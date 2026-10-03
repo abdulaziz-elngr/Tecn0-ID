@@ -13,7 +13,11 @@ const listSchema = paginationSchema.extend({
   teacherId: z.string().uuid().optional(),
   status: z.enum(["SCHEDULED", "OPEN", "COMPLETED", "CANCELLED"]).optional(),
   from: z.string().date().optional(),
-  to: z.string().date().optional()
+  to: z.string().date().optional(),
+  // Lessons page: a whole calendar month, and/or one monthly plan.
+  year: z.coerce.number().int().min(2000).max(2100).optional(),
+  month: z.coerce.number().int().min(1).max(12).optional(),
+  planId: z.string().uuid().optional()
 });
 
 const createSchema = z.object({
@@ -36,11 +40,20 @@ export async function GET(request: NextRequest) {
       ...(query.groupId ? { groupId: query.groupId } : {}),
       ...(query.teacherId ? { teacherId: query.teacherId } : {}),
       ...(query.status ? { status: query.status } : {}),
+      ...(query.planId ? { planId: query.planId } : {}),
       ...(query.from || query.to
         ? {
             date: {
               ...(query.from ? { gte: toDateOnly(query.from) } : {}),
               ...(query.to ? { lte: toDateOnly(query.to) } : {})
+            }
+          }
+        : {}),
+      ...(query.year && query.month
+        ? {
+            date: {
+              gte: new Date(Date.UTC(query.year, query.month - 1, 1)),
+              lt: new Date(Date.UTC(query.year, query.month, 1))
             }
           }
         : {})
@@ -50,7 +63,10 @@ export async function GET(request: NextRequest) {
       db.classSession.count({ where }),
       db.classSession.findMany({
         where,
-        orderBy: [{ date: "desc" }, { startMinutes: "asc" }],
+        orderBy:
+          query.year && query.month
+            ? [{ date: "asc" }, { startMinutes: "asc" }]
+            : [{ date: "desc" }, { startMinutes: "asc" }],
         skip: (query.page - 1) * query.pageSize,
         take: query.pageSize,
         select: {
@@ -59,12 +75,15 @@ export async function GET(request: NextRequest) {
           startMinutes: true,
           endMinutes: true,
           status: true,
+          lessonNumber: true,
+          planId: true,
           group: {
             select: {
               id: true,
               name: true,
               capacity: true,
               grade: { select: { id: true, name: true, stage: { select: { id: true, name: true } } } },
+              subject: { select: { id: true, name: true } },
               teacher: { select: { id: true, fullName: true } }
             }
           },

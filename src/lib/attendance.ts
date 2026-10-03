@@ -62,6 +62,12 @@ export interface AttendanceFacts {
   /** Minutes elapsed since the session's scheduled start (can be negative). */
   minutesAfterStart: number;
   sessionStatus: "SCHEDULED" | "OPEN" | "COMPLETED" | "CANCELLED";
+  /**
+   * Stage 2: lessons that belong to a monthly plan are never opened as a side
+   * effect of a scan — an operator must open them explicitly (so the lesson
+   * order can't be skipped). Legacy sessions keep the old "first scan opens it".
+   */
+  requiresExplicitOpen?: boolean;
   studentStatus: "ACTIVE" | "INACTIVE" | "SUSPENDED" | "GRADUATED";
   lateThresholdMinutes?: number;
 }
@@ -73,6 +79,7 @@ export type AttendanceDecisionCode =
   | "DUPLICATE"
   | "SESSION_CANCELLED"
   | "SESSION_COMPLETED"
+  | "LESSON_NOT_OPEN"
   | "STUDENT_NOT_ACTIVE"
   | "DIFFERENT_GROUP"
   | "CAPACITY_FULL"
@@ -105,6 +112,9 @@ export function evaluateAttendance(
   }
   if (facts.sessionStatus === "COMPLETED") {
     return deny("SESSION_COMPLETED", "This session is already closed for attendance.");
+  }
+  if (facts.requiresExplicitOpen && facts.sessionStatus !== "OPEN") {
+    return deny("LESSON_NOT_OPEN", "This lesson is not open. Open the lesson before recording attendance.");
   }
   if (facts.studentStatus !== "ACTIVE") {
     return deny("STUDENT_NOT_ACTIVE", "This student account is not active.");

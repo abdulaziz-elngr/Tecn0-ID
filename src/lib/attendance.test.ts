@@ -168,6 +168,37 @@ describe("attendanceRate", () => {
   });
 });
 
+describe("evaluateAttendance — explicit lesson opening (Stage 2)", () => {
+  it("refuses a scan for a numbered lesson that has not been opened", () => {
+    const result = evaluateAttendance(baseFacts({ sessionStatus: "SCHEDULED", requiresExplicitOpen: true }));
+    expect(result.allowed).toBe(false);
+    expect(result.code).toBe("LESSON_NOT_OPEN");
+  });
+
+  it("accepts the same scan once the lesson is OPEN", () => {
+    const result = evaluateAttendance(baseFacts({ sessionStatus: "OPEN", requiresExplicitOpen: true }));
+    expect(result.allowed).toBe(true);
+    expect(result.code).toBe("OK_REGULAR");
+  });
+
+  it("legacy sessions (no explicit open required) can still be scanned while SCHEDULED", () => {
+    const result = evaluateAttendance(baseFacts({ sessionStatus: "SCHEDULED" }));
+    expect(result.allowed).toBe(true);
+  });
+
+  it("a lesson stays scannable past its scheduled end — only lateness, never the clock, matters", () => {
+    // 3 hours after the scheduled start the lesson is still OPEN: the student is LATE, not refused.
+    const result = evaluateAttendance(baseFacts({ sessionStatus: "OPEN", requiresExplicitOpen: true, minutesAfterStart: 180 }));
+    expect(result.allowed).toBe(true);
+    expect(result.type).toBe("LATE");
+  });
+
+  it("a closed lesson refuses further scans (attendance is final)", () => {
+    const result = evaluateAttendance(baseFacts({ sessionStatus: "COMPLETED", requiresExplicitOpen: true }));
+    expect(result.code).toBe("SESSION_COMPLETED");
+  });
+});
+
 describe("normalizeScanInput", () => {
   it("trims whitespace and uppercases the payload", () => {
     expect(normalizeScanInput("  abc123  ")).toBe("ABC123");

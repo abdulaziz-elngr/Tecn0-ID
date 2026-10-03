@@ -4,9 +4,10 @@ import { db } from "@/lib/db";
 import { requirePermission } from "@/lib/rbac";
 import { handleApiError, ok, readJson, NotFoundError, BusinessRuleError } from "@/lib/api";
 import { writeAuditLog } from "@/lib/audit";
+import { canCancelLesson } from "@/lib/lesson-flow";
 
 const patchSchema = z.object({
-  status: z.enum(["SCHEDULED", "OPEN", "COMPLETED", "CANCELLED"]).optional(),
+  status: z.enum(["CANCELLED"]).optional(),
   notes: z.string().trim().max(500).optional(),
   reason: z.string().trim().min(3).max(500).optional()
 });
@@ -39,6 +40,7 @@ export async function GET(_request: NextRequest, { params }: { params: { id: str
             grade: { select: { id: true, name: true, stage: { select: { id: true, name: true } } } },
             teacher: { select: { id: true, fullName: true } },
             assistant: { select: { id: true, fullName: true } },
+            subject: { select: { id: true, name: true, code: true } },
             students: {
               where: { deletedAt: null },
               select: {
@@ -110,12 +112,17 @@ export async function GET(_request: NextRequest, { params }: { params: { id: str
         endMinutes: session.endMinutes,
         status: session.status,
         notes: session.notes,
+        lessonNumber: session.lessonNumber,
+        planId: session.planId,
+        openedAt: session.openedAt,
+        closedAt: session.closedAt,
         group: {
           id: session.group.id,
           name: session.group.name,
           capacity: session.group.capacity,
           grade: session.group.grade,
           stage: session.group.grade.stage,
+          subject: session.group.subject,
           teacher: session.group.teacher,
           assistant: session.group.assistant
         }
@@ -139,6 +146,11 @@ export async function GET(_request: NextRequest, { params }: { params: { id: str
   }
 }
 
+/**
+ * Notes and cancellation only. Opening and closing a lesson have their own
+ * endpoints (POST /api/sessions/:id/open and /close) so the lesson order and
+ * "only an explicit close completes a lesson" rules can't be bypassed here.
+ */
 export async function PATCH(request: NextRequest, { params }: { params: { id: string } }) {
   try {
     const ctx = await requirePermission("sessions.update");
@@ -147,65 +159,34 @@ export async function PATCH(request: NextRequest, { params }: { params: { id: st
 
     const input = await readJson(request, patchSchema);
 
-    // Cancelling a session that already has attendance needs a reason —
-    // it changes the meaning of historical records.
     if (input.status === "CANCELLED") {
+      if (!canCancelLesson(existing.status)) {
+        throw new BusinessRuleError(
+          existing.status === "COMPLETED"
+            ? "A closed lesson is final and cannot be cancelled."
+            : "This lesson is already cancelled.",
+          { code: "CANNOT_CANCEL" }
+        );
+      }
+      // Cancelling changes the meaning of history (and, for a numbered lesson,
+      // lets the plan move on), so a reason is always required.
       const recorded = await db.attendance.count({
         where: { sessionId: existing.id, deletedAt: null }
       });
-      if (recorded > 0 && !input.reason) {
-        throw new BusinessRuleError(
-          "This session already has attendance records. A reason is required to cancel it."
-        );
+      if ((recorded > 0 || existing.lessonNumber !== null) && !input.reason) {
+        throw new BusinessRuleError("A reason is required to cancel this lesson.", { code: "REASON_REQUIRED" });
       }
     }
 
     const updated = await db.classSession.update({
       where: { id: existing.id },
-      data: {
-        status: input.status,
-        notes: input.notes,
-        openedAt: input.status === "OPEN" && !existing.openedAt ? new Date() : existing.openedAt,
-        closedAt: input.status === "COMPLETED" ? new Date() : existing.closedAt
-      }
+      data: { status: input.status, notes: input.notes }
     });
-
-    // Closing a session (spec §13/§14) finalizes attendance: every
-    // roster student with no attendance row yet is marked ABSENT so
-    // the Absent list and its WhatsApp button have real data to show,
-    // rather than requiring a manual pass afterwards.
-    if (input.status === "COMPLETED" && existing.status !== "COMPLETED") {
-      const [roster, recorded] = await Promise.all([
-        db.student.findMany({
-          where: { groupId: existing.groupId, deletedAt: null, status: "ACTIVE" },
-          select: { id: true }
-        }),
-        db.attendance.findMany({
-          where: { sessionId: existing.id, deletedAt: null },
-          select: { studentId: true }
-        })
-      ]);
-      const recordedIds = new Set(recorded.map((r) => r.studentId));
-      const absentees = roster.filter((s) => !recordedIds.has(s.id));
-      if (absentees.length > 0) {
-        await db.attendance.createMany({
-          data: absentees.map((s) => ({
-            organizationId: ctx.organizationId,
-            branchId: existing.branchId,
-            sessionId: existing.id,
-            studentId: s.id,
-            groupId: existing.groupId,
-            type: "ABSENT" as const,
-            operatorUserId: ctx.userId
-          }))
-        });
-      }
-    }
 
     await writeAuditLog({
       organizationId: ctx.organizationId,
       actorUserId: ctx.userId,
-      action: "UPDATE_SESSION",
+      action: input.status === "CANCELLED" ? "CANCEL_LESSON" : "UPDATE_SESSION",
       entityType: "ClassSession",
       entityId: updated.id,
       beforeValue: existing,

@@ -157,6 +157,16 @@ export async function POST(request: NextRequest) {
     if (session.status === "CANCELLED") {
       throw new BusinessRuleError("This session has been cancelled.");
     }
+    // A closed lesson is final: its attendance is no longer taken, only
+    // corrected through the audited adjustment flow (PATCH /api/attendance/:id).
+    if (session.status === "COMPLETED") {
+      throw new BusinessRuleError("This lesson is already closed for attendance.", { code: "SESSION_COMPLETED" });
+    }
+    if (session.planId !== null && session.status !== "OPEN") {
+      throw new BusinessRuleError("This lesson is not open. Open the lesson before recording attendance.", {
+        code: "LESSON_NOT_OPEN"
+      });
+    }
 
     const student = await db.student.findFirst({
       where: { id: input.studentId, organizationId: ctx.organizationId, deletedAt: null },

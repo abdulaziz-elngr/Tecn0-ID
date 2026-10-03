@@ -6,6 +6,7 @@ import { handleApiError, ok, readJson, clientIp, userAgent, BusinessRuleError } 
 import { checkRateLimit } from "@/lib/rate-limit";
 import { evaluateAttendance, normalizeScanInput, type AttendanceFacts } from "@/lib/attendance";
 import { minutesAfterStart } from "@/lib/sessions";
+import { getCenterTimeZone, snapshotFor } from "@/lib/lesson-data";
 import { getLateThresholdMinutes, getMakeUpRules } from "@/lib/settings";
 import { writeAuditLog } from "@/lib/audit";
 import { dispatchEvent } from "@/lib/notifications";
@@ -159,8 +160,14 @@ export async function POST(request: NextRequest) {
       daysSinceOriginSession: daysSinceOrigin,
       confirmMakeUp: Boolean(input.confirmMakeUp),
       overrideCapacity: canOverrideCapacity,
-      minutesAfterStart: minutesAfterStart(session.date, session.startMinutes),
+      minutesAfterStart: minutesAfterStart(
+        session.date,
+        session.startMinutes,
+        new Date(),
+        await getCenterTimeZone(session.branchId)
+      ),
       sessionStatus: session.status,
+      requiresExplicitOpen: session.planId !== null,
       studentStatus: student.status,
       lateThresholdMinutes: lateThreshold
     };
@@ -174,8 +181,12 @@ export async function POST(request: NextRequest) {
       photoUrl: student.photoUrl,
       currentGroup: student.group
     };
+    // Stage 2: everything the operator needs to know about this student,
+    // returned with EVERY outcome so it is on screen the moment of the scan.
+    const snapshot = await snapshotFor(ctx, session, student);
     const sessionCard = {
       id: session.id,
+      lessonNumber: session.lessonNumber,
       groupId: session.group.id,
       groupName: session.group.name,
       gradeName: session.group.grade.name,
@@ -191,7 +202,8 @@ export async function POST(request: NextRequest) {
         student: studentCard,
         session: sessionCard,
         currentGroup: student.group,
-        selectedGroup: { id: session.group.id, name: session.group.name }
+        selectedGroup: { id: session.group.id, name: session.group.name },
+        snapshot
       });
     }
 
@@ -202,7 +214,8 @@ export async function POST(request: NextRequest) {
         message: decision.message,
         student: studentCard,
         session: sessionCard,
-        existingAttendance: existing
+        existingAttendance: existing,
+        snapshot
       });
     }
 
@@ -223,8 +236,10 @@ export async function POST(request: NextRequest) {
       }
     });
 
-    // Opening the session on the first scan saves the operator a click.
-    if (session.status === "SCHEDULED") {
+    // Legacy (unnumbered) sessions are still opened by the first scan. Lessons
+    // of a monthly plan never get here while SCHEDULED: evaluateAttendance()
+    // refuses them with LESSON_NOT_OPEN until an operator opens the lesson.
+    if (session.status === "SCHEDULED" && session.planId === null) {
       await db.classSession.update({
         where: { id: session.id },
         data: { status: "OPEN", openedAt: new Date() }
@@ -269,7 +284,8 @@ export async function POST(request: NextRequest) {
         recordedAt: attendance.recordedAt
       },
       student: studentCard,
-      session: sessionCard
+      session: sessionCard,
+      snapshot: { ...snapshot, thisLesson: { type: attendance.type, recordedAt: attendance.recordedAt } }
     });
   } catch (err) {
     return handleApiError("attendance.scan", err);

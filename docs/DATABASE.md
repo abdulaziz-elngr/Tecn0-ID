@@ -109,3 +109,26 @@ that is the symptom, not a real bug in the affected files).
   subscriptions reference the group; otherwise archive (`isActive = false`).
 - Existing databases: apply `prisma/sql/2026-10-stage1-groups-subjects.sql`
   (additive, idempotent). Fresh dev databases can use `prisma db push`.
+
+## Stage 2 additions — Lesson formation (تشكيل الحصص)
+
+- `LessonPlan (groupId, year, month, lessonsPerWeek)` — one row per group per
+  calendar month (`@@unique([groupId, year, month])`), so re-forming a month can
+  never overwrite lesson history. Subject and teacher are **not** duplicated:
+  the subject comes from `Group.subjectId`; the teacher is copied onto every
+  `ClassSession.teacherId` at creation so history survives a later teacher change.
+- `ClassSession` gains nullable `planId` (FK → `LessonPlan`, `ON DELETE SET NULL`),
+  `lessonNumber` (1-based inside the plan), `openedById`, `closedById`. Existing
+  sessions keep `NULL` in all four and work exactly as before.
+  `@@unique([planId, lessonNumber])` keeps numbers unique per plan (NULLs never clash).
+- Lesson status reuses `SessionStatus`: `SCHEDULED → OPEN → COMPLETED` (or `CANCELLED`).
+  `COMPLETED` is final; `closedAt`/`closedById` record who closed it. A lesson is
+  never closed automatically when its time ends.
+- Lateness is now measured against the real start **instant**: `startMinutes` is the
+  centre's local wall-clock time (`Center.timezone`, default `Africa/Cairo`), converted
+  with `src/lib/tz.ts`. (Before Stage 2 it was read as UTC, shifting every LATE decision
+  by the UTC offset.)
+- Nothing is dropped or renamed; no attendance, student, payment, exam, recitation or
+  teacher row is touched. Existing databases: apply
+  `prisma/sql/2026-10-stage2-lesson-plans.sql` (additive, idempotent) after the Stage 1
+  script. Fresh dev databases can use `prisma db push`.

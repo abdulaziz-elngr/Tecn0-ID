@@ -1,51 +1,37 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useI18n } from "@/lib/i18n";
-import { apiPost, formatDateTime, todayISO, useApi } from "@/lib/client";
-import { Badge, ErrorNotice, Field, PageHeader } from "@/components/ui";
+import Link from "next/link";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { hasDictKey, useI18n } from "@/lib/i18n";
+import { apiPost, currentMonth, formatDateTime, qs, useApi } from "@/lib/client";
+import { fmt, formatLessonDate, formatTimeRange, localizeError, monthLabel, parseMonthInput, weekdayLabel } from "@/lib/lesson-format";
+import { currentLesson, nextLesson } from "@/lib/lesson-flow";
+import { Badge, ConfirmDialog, ErrorNotice, Field, PageHeader, useToast } from "@/components/ui";
+import { GroupPicker } from "@/components/GroupPicker";
+import { StudentSnapshotCard, type StudentSnapshot } from "@/components/StudentSnapshotCard";
 
 /**
- * Attendance scanner (spec §8–§13).
+ * Attendance scanner / lesson workspace (spec §8–§13, Stage 2).
  *
- * Flow: Stage -> Grade -> Group -> Generate/pick today's session ->
- * scan. A USB/Bluetooth barcode gun works with zero clicks since the
- * code input stays focused; it types the code and sends Enter.
+ * Flow: Month → Stage › Grade › Subject › Group → pick the lesson of that
+ * month → OPEN it → scan / manually mark students (each scan shows the
+ * student's info card) → CLOSE it explicitly. A lesson is never closed by the
+ * clock. Lessons come from تشكيل الحصص; a USB/Bluetooth barcode gun works with
+ * zero clicks since the code input stays focused.
  *
- * Cross-group scans (spec §10) never write silently: the API replies
- * with status "NEEDS_CONFIRMATION" and this page shows the "Student
- * belongs to another group" panel with Accept make-up / Reject — only
- * Accept resubmits the same scan with confirmMakeUp:true.
+ * Cross-group scans (spec §10) never write silently: the API replies with
+ * status "NEEDS_CONFIRMATION" and only "Accept make-up" resubmits the scan
+ * with confirmMakeUp:true.
  */
 
-interface StageOption {
+interface LessonRow {
   id: string;
-  name: string;
-  isActive: boolean;
-  grades: { id: string; name: string; isActive: boolean }[];
-}
-
-interface GroupOption {
-  id: string;
-  name: string;
-  gradeId: string;
-  capacity: number;
-  currentCount: number;
-}
-
-interface SessionRow {
-  id: string;
+  lessonNumber: number | null;
   date: string;
   startMinutes: number;
   endMinutes: number;
-  status: string;
-  group: {
-    id: string;
-    name: string;
-    capacity: number;
-    grade: { id: string; name: string; stage: { id: string; name: string } };
-    teacher: { id: string; fullName: string } | null;
-  };
+  status: "SCHEDULED" | "OPEN" | "COMPLETED" | "CANCELLED";
+  group: { id: string; name: string; capacity: number };
   _count: { attendances: number };
 }
 
@@ -58,6 +44,7 @@ interface StudentCard {
 }
 interface SessionCard {
   id: string;
+  lessonNumber: number | null;
   groupId: string;
   groupName: string;
   gradeName: string;
@@ -73,70 +60,99 @@ interface ScanResult {
   attendance?: { id: string; type: string; recordedAt: string };
   currentGroup?: { id: string; name: string } | null;
   selectedGroup?: { id: string; name: string };
+  snapshot?: StudentSnapshot;
 }
 
-function minutesToTime(minutes: number): string {
-  const h = Math.floor(minutes / 60);
-  const m = minutes % 60;
-  return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
+interface ManualStudent {
+  id: string;
+  fullName: string;
+  studentCode: string;
+  groupId: string;
+  group: { name: string } | null;
 }
 
-function nowMinutes(): number {
-  const now = new Date();
-  return now.getHours() * 60 + now.getMinutes();
+function statusTone(status: string) {
+  if (status === "COMPLETED") return "success" as const;
+  if (status === "CANCELLED") return "danger" as const;
+  if (status === "OPEN") return "brand" as const;
+  return "neutral" as const;
 }
 
 export default function ScannerPage() {
-  const { t } = useI18n();
-  const today = todayISO();
+  const { t, locale } = useI18n();
+  const toast = useToast();
+  const errText = (err: unknown) => localizeError(err, t as (key: never) => string, hasDictKey);
 
-  const { data: stages } = useApi<StageOption[]>("/api/stages");
-  const { data: groups } = useApi<GroupOption[]>("/api/groups");
-
-  const [stageId, setStageId] = useState("");
-  const [gradeId, setGradeId] = useState("");
+  const [monthValue, setMonthValue] = useState(currentMonth());
+  const ym = parseMonthInput(monthValue);
   const [groupId, setGroupId] = useState("");
 
-  const selectedStage = stages?.find((s) => s.id === stageId);
-  const gradesForStage = selectedStage?.grades.filter((g) => g.isActive) ?? [];
-  const groupsForGrade = useMemo(() => (groups ?? []).filter((g) => g.gradeId === gradeId), [groups, gradeId]);
-
-  const {
-    data,
-    loading: sessionsLoading,
-    reload: reloadSessions
-  } = useApi<{ sessions: SessionRow[] }>(
-    groupId ? `/api/sessions?groupId=${groupId}&from=${today}&to=${today}&pageSize=10` : null
+  const lessons = useApi<{ sessions: LessonRow[] }>(
+    groupId && ym ? `/api/sessions${qs({ groupId, year: ym.year, month: ym.month, pageSize: 100 })}` : null
   );
-  const sessions = data?.sessions ?? [];
+  const rows = lessons.data?.sessions ?? [];
 
   const [sessionId, setSessionId] = useState("");
+  // Pick the lesson to work on: the open one, else the next one in order.
   useEffect(() => {
-    setSessionId(sessions[0]?.id ?? "");
-  }, [sessions]);
+    if (!lessons.data) return;
+    if (sessionId && rows.some((r) => r.id === sessionId)) return;
+    const refs = rows.map((r) => ({ ...r, id: r.id, lessonNumber: r.lessonNumber, status: r.status }));
+    const pick = currentLesson(refs) ?? nextLesson(refs) ?? rows[rows.length - 1] ?? null;
+    setSessionId(pick?.id ?? "");
+  }, [lessons.data]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const [generating, setGenerating] = useState(false);
-  const [generateError, setGenerateError] = useState<string | null>(null);
+  const selected = rows.find((r) => r.id === sessionId) ?? null;
+  const isOpen = selected?.status === "OPEN";
 
-  async function generateSession() {
-    setGenerating(true);
-    setGenerateError(null);
+  const [lifecycleBusy, setLifecycleBusy] = useState(false);
+  const [lifecycleError, setLifecycleError] = useState<string | null>(null);
+  const [confirmClose, setConfirmClose] = useState(false);
+
+  async function openSelected() {
+    if (!selected) return;
+    setLifecycleBusy(true);
+    setLifecycleError(null);
     try {
-      const now = nowMinutes();
-      await apiPost("/api/sessions", {
-        groupId,
-        date: today,
-        startTimeMinutes: Math.max(0, now - 5),
-        endTimeMinutes: Math.min(1439, now + 120)
-      });
-      reloadSessions();
+      await apiPost(`/api/sessions/${selected.id}/open`);
+      toast.success(t("lesson.opened"));
+      lessons.reload();
     } catch (err) {
-      setGenerateError(err instanceof Error ? err.message : "Failed to generate session.");
+      setLifecycleError(errText(err));
     } finally {
-      setGenerating(false);
+      setLifecycleBusy(false);
     }
   }
 
+  async function closeSelected() {
+    if (!selected) return;
+    setLifecycleBusy(true);
+    setLifecycleError(null);
+    try {
+      const result = await apiPost<{ absentMarked: number; nextLesson: { id: string; lessonNumber: number | null } | null }>(
+        `/api/sessions/${selected.id}/close`
+      );
+      setConfirmClose(false);
+      toast.success(
+        `${fmt(t("lesson.closed"), { absent: result.absentMarked })} ${
+          result.nextLesson?.lessonNumber ? fmt(t("lesson.nextIs"), { n: result.nextLesson.lessonNumber }) : t("lesson.noNext")
+        }`
+      );
+      setResult(null);
+      setHistory([]);
+      setManualSelected(null);
+      // Move on to the next lesson of the plan.
+      setSessionId(result.nextLesson?.id ?? selected.id);
+      lessons.reload();
+    } catch (err) {
+      setConfirmClose(false);
+      setLifecycleError(errText(err));
+    } finally {
+      setLifecycleBusy(false);
+    }
+  }
+
+  // -- Scan state --
   const [code, setCode] = useState("");
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<ScanResult | null>(null);
@@ -149,11 +165,14 @@ export default function ScannerPage() {
   // -- Manual attendance (spec §11): search by name/ID/phone/parent phone --
   const [mode, setMode] = useState<"SCAN" | "MANUAL">("SCAN");
   const [manualQuery, setManualQuery] = useState("");
-  const [manualResults, setManualResults] = useState<
-    { id: string; fullName: string; studentCode: string; groupId: string; group: { name: string } | null }[]
-  >([]);
+  const [manualResults, setManualResults] = useState<ManualStudent[]>([]);
   const [manualBusy, setManualBusy] = useState(false);
   const [manualMessage, setManualMessage] = useState<string | null>(null);
+  const [manualSelected, setManualSelected] = useState<ManualStudent | null>(null);
+
+  const snapshot = useApi<StudentSnapshot>(
+    manualSelected && sessionId ? `/api/sessions/${sessionId}/student-snapshot${qs({ studentId: manualSelected.id })}` : null
+  );
 
   useEffect(() => {
     const term = manualQuery.trim();
@@ -179,11 +198,11 @@ export default function ScannerPage() {
     setManualMessage(null);
     try {
       await apiPost("/api/attendance", { studentId, sessionId, type });
-      setManualMessage("Attendance recorded.");
-      setManualQuery("");
-      setManualResults([]);
+      setManualMessage(t("scanner.recorded"));
+      snapshot.reload();
+      lessons.reload();
     } catch (err) {
-      setManualMessage(err instanceof Error ? err.message : "Failed to record attendance.");
+      setManualMessage(errText(err));
     } finally {
       setManualBusy(false);
     }
@@ -191,10 +210,8 @@ export default function ScannerPage() {
 
   const refocus = useCallback(() => inputRef.current?.focus(), []);
   useEffect(() => {
-    refocus();
-  }, [refocus, sessionId]);
-
-  const selected = sessions.find((s) => s.id === sessionId) ?? null;
+    if (isOpen && mode === "SCAN") refocus();
+  }, [refocus, sessionId, isOpen, mode]);
 
   async function runScan(scanCode: string, confirmMakeUp: boolean) {
     setBusy(true);
@@ -211,11 +228,12 @@ export default function ScannerPage() {
         setHistory((list) => [response, ...list].slice(0, 15));
         setPendingCode(null);
         setMakeUpReason("");
+        if (response.status === "ACCEPTED") lessons.reload();
       } else {
         setPendingCode(scanCode);
       }
     } catch (err) {
-      setScanError(err instanceof Error ? err.message : "Scan failed.");
+      setScanError(errText(err));
       setResult(null);
       setPendingCode(null);
     } finally {
@@ -227,7 +245,7 @@ export default function ScannerPage() {
   async function submit(event: React.FormEvent) {
     event.preventDefault();
     const trimmed = code.trim();
-    if (!trimmed || !sessionId || busy) return;
+    if (!trimmed || !sessionId || busy || !isOpen) return;
     setCode("");
     await runScan(trimmed, false);
   }
@@ -250,103 +268,128 @@ export default function ScannerPage() {
 
   const accepted = result?.status === "ACCEPTED";
   const needsConfirmation = result?.status === "NEEDS_CONFIRMATION";
+  const codeText = (c: string, fallback: string) => {
+    const key = `scanner.code.${c}`;
+    return hasDictKey(key) ? t(key as Parameters<typeof t>[0]) : fallback;
+  };
 
   return (
     <div className="space-y-5">
       <PageHeader title={t("scanner.title")} description={t("scanner.subtitle")} />
 
-      <div className="card grid gap-3 p-4 sm:grid-cols-3">
-        <Field label={t("nav.stages")} required>
-          {(id) => (
-            <select
-              id={id}
-              className="input"
-              value={stageId}
-              onChange={(e) => {
-                setStageId(e.target.value);
-                setGradeId("");
-                setGroupId("");
-              }}
-            >
-              <option value="">{t("common.select")}</option>
-              {(stages ?? [])
-                .filter((s) => s.isActive)
-                .map((s) => (
-                  <option key={s.id} value={s.id}>
-                    {s.name}
-                  </option>
-                ))}
-            </select>
-          )}
-        </Field>
-        <Field label={t("grades.title")} required>
-          {(id) => (
-            <select
-              id={id}
-              className="input"
-              value={gradeId}
-              disabled={!stageId}
-              onChange={(e) => {
-                setGradeId(e.target.value);
-                setGroupId("");
-              }}
-            >
-              <option value="">{t("common.select")}</option>
-              {gradesForStage.map((g) => (
-                <option key={g.id} value={g.id}>
-                  {g.name}
-                </option>
-              ))}
-            </select>
-          )}
-        </Field>
-        <Field label={t("nav.groups")} required>
-          {(id) => (
-            <select id={id} className="input" value={groupId} disabled={!gradeId} onChange={(e) => setGroupId(e.target.value)}>
-              <option value="">{t("common.select")}</option>
-              {groupsForGrade.map((g) => (
-                <option key={g.id} value={g.id}>
-                  {g.name} ({g.currentCount}/{g.capacity})
-                </option>
-              ))}
-            </select>
-          )}
-        </Field>
+      <div className="card space-y-3 p-4">
+        <div className="max-w-xs">
+          <Field label={t("lf.month")} required>
+            {(id) => (
+              <input
+                id={id}
+                type="month"
+                className="input"
+                value={monthValue}
+                onChange={(e) => {
+                  setMonthValue(e.target.value);
+                  setSessionId("");
+                }}
+              />
+            )}
+          </Field>
+        </div>
+        <GroupPicker
+          groupId={groupId}
+          onChange={(id) => {
+            setGroupId(id);
+            setSessionId("");
+            setResult(null);
+            setHistory([]);
+            setManualSelected(null);
+          }}
+        />
       </div>
 
       {groupId && (
         <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_320px]">
           <div className="space-y-4">
-            <div className="card p-4">
-              {sessionsLoading && <p className="text-sm text-black/50 dark:text-white/50">{t("common.loading")}</p>}
-              {!sessionsLoading && sessions.length === 0 && (
+            {/* ---- Lesson selection + lifecycle ---- */}
+            <div className="card space-y-3 p-4">
+              <ErrorNotice message={lessons.error} />
+              {lessons.loading && !lessons.data && <p className="text-sm text-black/50 dark:text-white/50">{t("common.loading")}</p>}
+
+              {lessons.data && rows.length === 0 && (
                 <div className="flex flex-col items-start gap-2">
                   <p className="text-sm text-black/60 dark:text-white/60">
-                    No session yet today for this group.
+                    {t("scanner.noPlan")} {ym && `(${monthLabel(ym.year, ym.month, locale)})`}
                   </p>
-                  <ErrorNotice message={generateError} />
-                  <button type="button" className="btn-primary" onClick={generateSession} disabled={generating}>
-                    {generating ? t("common.loading") : t("scanner.generateSession") }
-                  </button>
+                  <Link href="/dashboard/academic/lesson-formation" className="btn-primary">
+                    {t("scanner.goFormation")}
+                  </Link>
                 </div>
               )}
-              {sessions.length > 0 && (
-                <Field label={t("scanner.session")}>
-                  {(id) => (
-                    <select id={id} className="input text-base" value={sessionId} onChange={(e) => setSessionId(e.target.value)}>
-                      {sessions.map((s) => (
-                        <option key={s.id} value={s.id}>
-                          {minutesToTime(s.startMinutes)}–{minutesToTime(s.endMinutes)} · {s.group.name} (
-                          {s._count.attendances}/{s.group.capacity}) · {s.status}
-                        </option>
-                      ))}
-                    </select>
-                  )}
-                </Field>
+
+              {rows.length > 0 && (
+                <>
+                  <p className="text-sm font-medium">{t("scanner.lessons")}</p>
+                  <div className="flex flex-wrap gap-2">
+                    {rows.map((row) => (
+                      <button
+                        key={row.id}
+                        type="button"
+                        aria-pressed={row.id === sessionId}
+                        onClick={() => {
+                          setSessionId(row.id);
+                          setResult(null);
+                          setManualSelected(null);
+                        }}
+                        className={`min-w-[8.5rem] rounded-lg border px-3 py-2 text-start text-sm transition ${
+                          row.id === sessionId
+                            ? "border-tecno-gold bg-tecno-gold/10"
+                            : "border-black/10 hover:bg-black/5 dark:border-white/10 dark:hover:bg-white/5"
+                        }`}
+                      >
+                        <span className="flex items-center justify-between gap-2">
+                          <span className="font-semibold">
+                            {row.lessonNumber !== null ? fmt(t("lesson.label"), { n: row.lessonNumber }) : t("lesson.legacy")}
+                          </span>
+                          <Badge tone={statusTone(row.status)}>{t(`lesson.status.${row.status}` as Parameters<typeof t>[0])}</Badge>
+                        </span>
+                        <span className="mt-0.5 block text-xs text-black/55 dark:text-white/55">
+                          {weekdayLabel(row.date, locale)} {formatLessonDate(row.date)}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                </>
+              )}
+
+              {selected && (
+                <div className="flex flex-wrap items-center justify-between gap-3 border-t border-black/5 pt-3 dark:border-white/10">
+                  <p className="text-sm text-black/65 dark:text-white/65">
+                    {formatTimeRange(selected.startMinutes, selected.endMinutes, locale)} · {selected._count.attendances} / {selected.group.capacity}
+                  </p>
+                  <div className="flex gap-2">
+                    {selected.status === "SCHEDULED" && (
+                      <button type="button" className="btn-primary" disabled={lifecycleBusy} onClick={openSelected}>
+                        {lifecycleBusy ? t("common.loading") : t("lesson.open")}
+                      </button>
+                    )}
+                    {selected.status === "OPEN" && (
+                      <button type="button" className="btn-primary" disabled={lifecycleBusy} onClick={() => setConfirmClose(true)}>
+                        {t("lesson.close")}
+                      </button>
+                    )}
+                    <Link href={`/dashboard/academic/sessions/${selected.id}`} className="btn-secondary">
+                      {t("lesson.report")}
+                    </Link>
+                  </div>
+                </div>
+              )}
+              <ErrorNotice message={lifecycleError} />
+              {selected?.status === "OPEN" && <p className="text-xs text-black/55 dark:text-white/55">{t("lesson.openHint")}</p>}
+              {selected && selected.status === "SCHEDULED" && (
+                <p className="text-sm text-black/60 dark:text-white/60">{t("scanner.openFirst")}</p>
               )}
             </div>
 
-            {sessionId && (
+            {isOpen && (
               <div className="flex gap-2">
                 <button
                   type="button"
@@ -365,7 +408,7 @@ export default function ScannerPage() {
               </div>
             )}
 
-            {sessionId && mode === "SCAN" && (
+            {isOpen && mode === "SCAN" && (
               <form onSubmit={submit} className="card p-4">
                 <Field label={t("scanner.placeholder")} required>
                   {(id) => (
@@ -384,68 +427,73 @@ export default function ScannerPage() {
                     />
                   )}
                 </Field>
-                <button
-                  type="submit"
-                  className="btn-primary mt-4 w-full py-3 text-base"
-                  disabled={busy || needsConfirmation}
-                >
+                <button type="submit" className="btn-primary mt-4 w-full py-3 text-base" disabled={busy || needsConfirmation}>
                   {busy ? t("common.loading") : t("common.confirm")}
                 </button>
               </form>
             )}
 
-            {sessionId && mode === "MANUAL" && (
-              <div className="card space-y-3 p-4">
-                <input
-                  className="input"
-                  placeholder="Search by name, ID, phone or parent phone"
-                  value={manualQuery}
-                  onChange={(e) => setManualQuery(e.target.value)}
-                />
-                {manualMessage && <p className="text-sm text-black/60 dark:text-white/60">{manualMessage}</p>}
-                <ul className="divide-y divide-black/5 dark:divide-white/5">
-                  {manualResults.map((s) => (
-                    <li key={s.id} className="flex flex-wrap items-center justify-between gap-2 py-2 text-sm">
-                      <div>
-                        <p className="font-medium">{s.fullName}</p>
-                        <p className="text-xs text-black/50 dark:text-white/50">
-                          {s.studentCode} · {s.group?.name ?? "—"}
-                          {s.groupId !== selected?.group.id && (
-                            <span className="ms-1 text-amber-600 dark:text-amber-400">(different group)</span>
-                          )}
-                        </p>
-                      </div>
-                      <div className="flex gap-1.5">
+            {isOpen && mode === "MANUAL" && (
+              <div className="space-y-3">
+                <div className="card space-y-3 p-4">
+                  <input
+                    className="input"
+                    placeholder="Search by name, ID, phone or parent phone"
+                    value={manualQuery}
+                    onChange={(e) => setManualQuery(e.target.value)}
+                  />
+                  <ul className="divide-y divide-black/5 dark:divide-white/5">
+                    {manualResults.map((s) => (
+                      <li key={s.id} className="flex flex-wrap items-center justify-between gap-2 py-2 text-sm">
+                        <div>
+                          <p className="font-medium">{s.fullName}</p>
+                          <p className="text-xs text-black/50 dark:text-white/50">
+                            {s.studentCode} · {s.group?.name ?? "—"}
+                            {s.groupId !== selected?.group.id && (
+                              <span className="ms-1 text-amber-600 dark:text-amber-400">(different group)</span>
+                            )}
+                          </p>
+                        </div>
                         <button
                           type="button"
                           className="btn-secondary px-2 py-1 text-xs"
-                          disabled={manualBusy}
-                          onClick={() => markManual(s.id, s.groupId === selected?.group.id ? "REGULAR" : "MAKE_UP")}
+                          onClick={() => {
+                            setManualSelected(s);
+                            setManualMessage(null);
+                          }}
                         >
-                          Present
+                          {t("scanner.select")}
                         </button>
-                        <button
-                          type="button"
-                          className="btn-secondary px-2 py-1 text-xs"
-                          disabled={manualBusy}
-                          onClick={() => markManual(s.id, "LATE")}
-                        >
-                          Late
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+
+                {manualSelected && (
+                  <div className="space-y-2">
+                    {snapshot.data && <StudentSnapshotCard snapshot={snapshot.data} />}
+                    <ErrorNotice message={snapshot.error} />
+                    {manualMessage && <p className="text-sm text-black/60 dark:text-white/60">{manualMessage}</p>}
+                    <div className="flex flex-wrap gap-2">
+                      <button
+                        type="button"
+                        className="btn-primary"
+                        disabled={manualBusy}
+                        onClick={() => markManual(manualSelected.id, manualSelected.groupId === selected?.group.id ? "REGULAR" : "MAKE_UP")}
+                      >
+                        {t("lesson.present")}
+                      </button>
+                      <button type="button" className="btn-secondary" disabled={manualBusy} onClick={() => markManual(manualSelected.id, "LATE")}>
+                        {t("lesson.late")}
+                      </button>
+                      {manualSelected.groupId !== selected?.group.id && (
+                        <button type="button" className="btn-secondary" disabled={manualBusy} onClick={() => markManual(manualSelected.id, "MAKE_UP")}>
+                          {t("scanner.makeup")}
                         </button>
-                        {s.groupId !== selected?.group.id && (
-                          <button
-                            type="button"
-                            className="btn-secondary px-2 py-1 text-xs"
-                            disabled={manualBusy}
-                            onClick={() => markManual(s.id, "MAKE_UP")}
-                          >
-                            {t("scanner.makeup")}
-                          </button>
-                        )}
-                      </div>
-                    </li>
-                  ))}
-                </ul>
+                      )}
+                    </div>
+                  </div>
+                )}
               </div>
             )}
 
@@ -457,9 +505,7 @@ export default function ScannerPage() {
                 <p className="text-lg font-bold text-amber-700 dark:text-amber-400">{t("scanner.differentGroup")}</p>
                 <p className="mt-2">
                   {result.student?.fullName}{" "}
-                  <span className="font-mono text-xs text-black/50 dark:text-white/50">
-                    {result.student?.studentCode}
-                  </span>
+                  <span className="font-mono text-xs text-black/50 dark:text-white/50">{result.student?.studentCode}</span>
                 </p>
                 <dl className="mt-2 space-y-1 text-sm">
                   <div className="flex justify-between">
@@ -471,12 +517,7 @@ export default function ScannerPage() {
                     <dd className="font-medium">{result.selectedGroup?.name ?? "—"}</dd>
                   </div>
                 </dl>
-                <input
-                  className="input mt-3"
-                  placeholder={t("common.reason")}
-                  value={makeUpReason}
-                  onChange={(e) => setMakeUpReason(e.target.value)}
-                />
+                <input className="input mt-3" placeholder={t("common.reason")} value={makeUpReason} onChange={(e) => setMakeUpReason(e.target.value)} />
                 <div className="mt-4 flex gap-2">
                   <button type="button" className="btn-primary flex-1" onClick={acceptMakeUp} disabled={busy}>
                     {t("scanner.acceptMakeup")}
@@ -495,28 +536,19 @@ export default function ScannerPage() {
                 aria-live="assertive"
               >
                 <div className="flex items-center gap-4">
-                  <span className={`text-4xl ${accepted ? "text-emerald-500" : "text-red-500"}`}>
-                    {accepted ? "✓" : "✕"}
-                  </span>
+                  <span className={`text-4xl ${accepted ? "text-emerald-500" : "text-red-500"}`}>{accepted ? "✓" : "✕"}</span>
                   <div className="min-w-0">
-                    <p className="text-lg font-bold">{accepted ? t("scanner.recorded") : result.message}</p>
+                    <p className="text-lg font-bold">{accepted ? t("scanner.recorded") : codeText(result.code, result.message)}</p>
                     {result.student && (
                       <p className="truncate text-base">
                         {result.student.fullName}{" "}
-                        <span className="font-mono text-xs text-black/50 dark:text-white/50">
-                          {result.student.studentCode}
-                        </span>
-                      </p>
-                    )}
-                    {result.session && (
-                      <p className="text-sm text-black/60 dark:text-white/60">
-                        {result.session.stageName} · {result.session.gradeName} · {result.session.groupName}
+                        <span className="font-mono text-xs text-black/50 dark:text-white/50">{result.student.studentCode}</span>
                       </p>
                     )}
                     {result.attendance && (
                       <p className="mt-1 flex items-center gap-2 text-sm">
                         <Badge tone={result.attendance.type === "LATE" ? "warning" : result.attendance.type === "MAKE_UP" ? "brand" : "success"}>
-                          {result.attendance.type}
+                          {t(`att.${result.attendance.type}` as Parameters<typeof t>[0])}
                         </Badge>
                         {formatDateTime(result.attendance.recordedAt)}
                       </p>
@@ -525,6 +557,9 @@ export default function ScannerPage() {
                 </div>
               </div>
             )}
+
+            {/* Student info — immediately after every scan outcome. */}
+            {result?.snapshot && <StudentSnapshotCard snapshot={result.snapshot} />}
           </div>
 
           <aside className="space-y-4">
@@ -533,19 +568,15 @@ export default function ScannerPage() {
                 <h3 className="mb-2 font-semibold">{selected.group.name}</h3>
                 <dl className="space-y-1 text-sm">
                   <div className="flex justify-between gap-2">
-                    <dt className="text-black/55 dark:text-white/55">{t("nav.stages")}</dt>
-                    <dd>{selected.group.grade.stage.name}</dd>
+                    <dt className="text-black/55 dark:text-white/55">{t("lesson.number")}</dt>
+                    <dd>{selected.lessonNumber ?? "—"}</dd>
                   </div>
                   <div className="flex justify-between gap-2">
-                    <dt className="text-black/55 dark:text-white/55">{t("grades.title")}</dt>
-                    <dd>{selected.group.grade.name}</dd>
+                    <dt className="text-black/55 dark:text-white/55">{t("common.date")}</dt>
+                    <dd>{formatLessonDate(selected.date)}</dd>
                   </div>
                   <div className="flex justify-between gap-2">
-                    <dt className="text-black/55 dark:text-white/55">{t("common.teacher")}</dt>
-                    <dd>{selected.group.teacher?.fullName ?? "—"}</dd>
-                  </div>
-                  <div className="flex justify-between gap-2">
-                    <dt className="text-black/55 dark:text-white/55">Attendance</dt>
+                    <dt className="text-black/55 dark:text-white/55">{t("scanner.session")}</dt>
                     <dd>
                       {selected._count.attendances} / {selected.group.capacity}
                     </dd>
@@ -553,7 +584,7 @@ export default function ScannerPage() {
                   <div className="flex justify-between gap-2">
                     <dt className="text-black/55 dark:text-white/55">{t("common.status")}</dt>
                     <dd>
-                      <Badge tone={selected.status === "OPEN" ? "success" : "neutral"}>{selected.status}</Badge>
+                      <Badge tone={statusTone(selected.status)}>{t(`lesson.status.${selected.status}` as Parameters<typeof t>[0])}</Badge>
                     </dd>
                   </div>
                 </dl>
@@ -571,10 +602,10 @@ export default function ScannerPage() {
                       <span className={entry.status === "ACCEPTED" ? "text-emerald-500" : "text-red-500"}>
                         {entry.status === "ACCEPTED" ? "✓" : "✕"}
                       </span>
-                      <span className="truncate">{entry.student?.fullName ?? entry.message}</span>
+                      <span className="truncate">{entry.student?.fullName ?? codeText(entry.code, entry.message)}</span>
                       {entry.attendance?.type && (
                         <Badge tone={entry.attendance.type === "LATE" ? "warning" : "neutral"}>
-                          {entry.attendance.type}
+                          {t(`att.${entry.attendance.type}` as Parameters<typeof t>[0])}
                         </Badge>
                       )}
                     </li>
@@ -587,10 +618,18 @@ export default function ScannerPage() {
       )}
 
       {!groupId && (
-        <div className="card p-6 text-sm text-black/60 dark:text-white/60">
-          Select a Stage, Grade and Group to begin.
-        </div>
+        <div className="card p-6 text-sm text-black/60 dark:text-white/60">{t("lf.pickGroup")}</div>
       )}
+
+      <ConfirmDialog
+        open={confirmClose}
+        title={t("lesson.closeTitle")}
+        message={t("lesson.closeMessage")}
+        confirmLabel={t("lesson.close")}
+        busy={lifecycleBusy}
+        onCancel={() => setConfirmClose(false)}
+        onConfirm={closeSelected}
+      />
     </div>
   );
 }

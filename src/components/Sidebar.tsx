@@ -47,9 +47,9 @@ const SECTIONS: NavSection[] = [
   {
     key: "nav.group.attendance",
     items: [
+      { href: "/dashboard/academic/lesson-formation", key: "nav.lessonFormation" },
       { href: "/dashboard/attendance/scan", key: "nav.scanner" },
       { href: "/dashboard/academic/sessions", key: "nav.sessions" },
-      { href: "/dashboard/attendance", key: "nav.attendance" },
       { href: "/dashboard/attendance/employees", key: "nav.employeeAttendance" }
     ]
   },
@@ -91,7 +91,7 @@ const BOTTOM: NavItem[] = [
 ];
 
 function isActive(pathname: string, href: string): boolean {
-  if (href === "/dashboard" || href === "/dashboard/academic" || href === "/dashboard/attendance") {
+  if (href === "/dashboard" || href === "/dashboard/academic") {
     return pathname === href;
   }
   return pathname === href || pathname.startsWith(`${href}/`);

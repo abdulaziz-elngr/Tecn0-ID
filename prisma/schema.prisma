@@ -331,6 +331,7 @@ model Group {
   students    Student[]
   schedules   Schedule[]
   sessions    ClassSession[]
+  lessonPlans LessonPlan[]
   exams       Exam[]
   assignments Assignment[]
 
@@ -603,19 +604,61 @@ model ClassSession {
   notes          String?
   openedAt       DateTime?
   closedAt       DateTime?
+  // Stage 2 — lesson formation. A session created from a monthly
+  // LessonPlan carries the plan it belongs to and its 1-based number
+  // inside that plan. Both stay NULL for sessions that pre-date lesson
+  // formation (they keep working exactly as before).
+  planId         String?
+  lessonNumber   Int?
+  openedById     String?
+  closedById     String?
   createdAt      DateTime      @default(now())
   updatedAt      DateTime      @updatedAt
 
   group       Group        @relation(fields: [groupId], references: [id])
+  plan        LessonPlan?  @relation(fields: [planId], references: [id])
   attendances Attendance[]
 
   // One session per group per date per start time — prevents accidental
   // double generation when the schedule generator is run twice.
   @@unique([groupId, date, startMinutes])
+  // A lesson number is unique inside its plan (NULL planIds never clash).
+  @@unique([planId, lessonNumber])
+  @@index([planId])
   @@index([organizationId])
   @@index([branchId])
   @@index([date])
   @@index([status])
+}
+
+/// Stage 2 — the monthly lesson plan of ONE group (تشكيل الحصص). It records
+/// which month/year the lessons were formed for and how many lessons per week
+/// were requested; the dated, numbered lessons themselves are ClassSession
+/// rows pointing back here via ClassSession.planId. Subject and teacher are
+/// not duplicated: the subject comes from Group.subjectId and the teacher is
+/// copied onto every ClassSession (ClassSession.teacherId) at creation time so
+/// history stays accurate if the group's teacher changes later.
+model LessonPlan {
+  id             String   @id @default(uuid())
+  organizationId String
+  branchId       String
+  groupId        String
+  year           Int
+  month          Int // 1–12
+  lessonsPerWeek Int
+  createdById    String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  group    Group          @relation(fields: [groupId], references: [id])
+  sessions ClassSession[]
+
+  // One plan per group per calendar month — re-forming a month can never
+  // overwrite lesson history.
+  @@unique([groupId, year, month])
+  @@index([organizationId])
+  @@index([branchId])
+  @@index([year, month])
 }
 
 enum AttendanceType {

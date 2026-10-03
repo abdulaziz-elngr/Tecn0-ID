@@ -77,3 +77,34 @@ body {
     max-width: 80mm !important;
   }
 }
+
+/* Lesson report (Stage 2): readable black-on-white paper output even when the
+   app is in dark mode. Scoped to .print-report so nothing else is affected. */
+@media print {
+  @page {
+    size: A4;
+    margin: 12mm;
+  }
+  .print-report,
+  .print-report * {
+    color: #000 !important;
+    background: transparent !important;
+    box-shadow: none !important;
+    border-color: #888 !important;
+  }
+  .print-report .card {
+    border: none !important;
+  }
+  .print-report table {
+    break-inside: auto;
+  }
+  .print-report tr {
+    break-inside: avoid;
+  }
+  .print-report section {
+    break-inside: avoid-page;
+  }
+  main {
+    padding: 0 !important;
+  }
+}
