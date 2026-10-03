@@ -1,0 +1,1229 @@
+// ==========================================================
+// TecnoID — Database Schema
+// PostgreSQL + Prisma
+//
+// Academic hierarchy is strict and non-negotiable:
+//   Organization -> Center -> Branch -> Stage -> Grade -> Group -> Student
+//
+// There is no concept of a physical Room/Classroom anywhere in this
+// schema. Group capacity is the only capacity that exists.
+//
+// Covers: Organization/Center/Branch hierarchy, granular RBAC,
+// academic structure (Stages/Grades/Groups), Students, Parents,
+// Sessions/Attendance (incl. cross-group make-up), Subscriptions/
+// Payments, Exams, Recitation, WhatsApp notifications, and Audit
+// Logging. See docs/ARCHITECTURE.md for the full data model.
+// ==========================================================
+
+generator client {
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "rhel-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ----------------------------------------------------------
+// ORGANIZATION HIERARCHY
+// ----------------------------------------------------------
+
+model Organization {
+  id        String   @id @default(uuid())
+  name      String
+  slug      String   @unique
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  deletedAt DateTime? // soft delete — org data must never be hard-deleted
+
+  centers     Center[]
+  users       User[]
+  roles       Role[]
+  auditLogs   AuditLog[]
+  settings    SystemSetting[]
+
+  @@index([slug])
+}
+
+model Center {
+  id             String   @id @default(uuid())
+  organizationId String
+  name           String
+  logoUrl        String?
+  address        String?
+  phone          String?
+  whatsappNumber String?
+  currency       String   @default("EGP")
+  timezone       String   @default("Africa/Cairo")
+  isActive       Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  deletedAt      DateTime?
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+  branches     Branch[]
+
+  @@index([organizationId])
+}
+
+model Branch {
+  id        String   @id @default(uuid())
+  centerId  String
+  name      String
+  address   String?
+  phone     String?
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  deletedAt DateTime?
+
+  center         Center          @relation(fields: [centerId], references: [id])
+  groups         Group[]
+  students       Student[]
+  employees      Employee[]
+  teachers       Teacher[]
+  userBranches   UserBranch[]
+
+  @@index([centerId])
+}
+
+// ----------------------------------------------------------
+// RBAC — USERS, ROLES, PERMISSIONS
+// ----------------------------------------------------------
+
+model User {
+  id             String    @id @default(uuid())
+  organizationId String
+  fullName       String
+  email          String?   @unique
+  phone          String?   @unique
+  passwordHash   String
+  isActive       Boolean   @default(true)
+  mfaEnabled     Boolean   @default(false)
+  mfaSecret      String?
+  lastLoginAt    DateTime?
+  failedLoginCount Int     @default(0)
+  lockedUntil    DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+  deletedAt      DateTime?
+
+  organization Organization  @relation(fields: [organizationId], references: [id])
+  userRoles    UserRole[]
+  userBranches UserBranch[]
+  sessions     Session[]
+  auditLogs    AuditLog[]     @relation("AuditActor")
+  teacherProfile Teacher?
+
+  @@index([organizationId])
+  @@index([email])
+  @@index([phone])
+}
+
+// Scopes a user's access to specific branches within their org.
+// SUPER_ADMIN / CENTER_OWNER typically have no rows here and are
+// treated as "all branches in org" — see src/lib/rbac.ts.
+model UserBranch {
+  id       String @id @default(uuid())
+  userId   String
+  branchId String
+
+  user   User   @relation(fields: [userId], references: [id])
+  branch Branch @relation(fields: [branchId], references: [id])
+
+  @@unique([userId, branchId])
+  @@index([userId])
+  @@index([branchId])
+}
+
+model Role {
+  id             String   @id @default(uuid())
+  organizationId String
+  name           String   // e.g. SUPER_ADMIN, CENTER_OWNER, MANAGER, TEACHER...
+  description    String?
+  isSystem       Boolean  @default(false) // seeded default roles cannot be deleted
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization    Organization     @relation(fields: [organizationId], references: [id])
+  userRoles       UserRole[]
+  rolePermissions RolePermission[]
+
+  @@unique([organizationId, name])
+  @@index([organizationId])
+}
+
+model Permission {
+  id          String @id @default(uuid())
+  key         String @unique // e.g. "students.view", "payments.refund"
+  module      String // e.g. "students", "payments"
+  description String?
+
+  rolePermissions RolePermission[]
+
+  @@index([module])
+}
+
+model RolePermission {
+  id           String @id @default(uuid())
+  roleId       String
+  permissionId String
+
+  role       Role       @relation(fields: [roleId], references: [id])
+  permission Permission @relation(fields: [permissionId], references: [id])
+
+  @@unique([roleId, permissionId])
+  @@index([roleId])
+  @@index([permissionId])
+}
+
+model UserRole {
+  id     String @id @default(uuid())
+  userId String
+  roleId String
+
+  user User @relation(fields: [userId], references: [id])
+  role Role @relation(fields: [roleId], references: [id])
+
+  @@unique([userId, roleId])
+  @@index([userId])
+  @@index([roleId])
+}
+
+// Server-side session store (in addition to the signed JWT cookie)
+// so that "revoke all sessions" and "active sessions" are real,
+// not just client-side illusions.
+model Session {
+  id           String    @id @default(uuid())
+  userId       String
+  tokenHash    String    @unique
+  userAgent    String?
+  ipAddress    String?
+  createdAt    DateTime  @default(now())
+  lastSeenAt   DateTime  @default(now())
+  expiresAt    DateTime
+  revokedAt    DateTime?
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+// ----------------------------------------------------------
+// ACADEMIC STRUCTURE
+// ----------------------------------------------------------
+
+// The academic hierarchy is strict: Stage -> Grade -> Group -> Student.
+// A Stage is a broad phase (Primary/Preparatory/Secondary). It has no
+// direct relationship to Group or Student — those always go through
+// a Grade. This is enforced by simply not exposing a stage-level FK
+// on Group/Student anywhere in this schema.
+model Stage {
+  id             String   @id @default(uuid())
+  organizationId String
+  name           String   // e.g. "Primary", "Preparatory", "Secondary"
+  order          Int      @default(0)
+  isActive       Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  grades           Grade[]
+  students         Student[]
+  subscriptionFees SubscriptionFee[]
+
+  @@unique([organizationId, name])
+  @@index([organizationId])
+}
+
+// A Grade always belongs to exactly one Stage. Groups (and therefore
+// Students) always belong to exactly one Grade — never to a Stage
+// directly.
+model Grade {
+  id       String  @id @default(uuid())
+  stageId  String
+  name     String  // e.g. "Grade 1", "Grade 2"
+  order    Int     @default(0)
+  isActive Boolean @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  stage    Stage     @relation(fields: [stageId], references: [id])
+  groups   Group[]
+  students Student[]
+
+  @@unique([stageId, name])
+  @@index([stageId])
+}
+
+// A Subject (e.g. Mathematics, Physics) is taught by Teachers and delivered
+// through Groups. Relationship chain:
+//   Subject -> Teacher (TeacherSubject, many-to-many, optional)
+//   Subject -> Group (Group.subjectId) -> Students (Student.groupId)
+// The Stage/Grade a subject is taught in is derived from its groups
+// (Group.gradeId -> Grade.stageId), so a subject can span several grades
+// without duplicating it. Exams also reference a subject.
+model Subject {
+  id             String   @id @default(uuid())
+  organizationId String
+  name           String
+  code           String? // optional short code, e.g. "MATH" (unique per organization when set)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  deletedAt      DateTime?
+
+  exams           Exam[]
+  groups          Group[]
+  teacherSubjects TeacherSubject[]
+
+  @@unique([organizationId, name])
+  @@unique([organizationId, code])
+}
+
+/// Declares that a Teacher is qualified/responsible for a Subject. This is
+/// descriptive staffing data: the teacher actually responsible for a given
+/// group stays Group.teacherId (single source of truth for exams, sessions
+/// and scheduling). A teacher may teach many subjects and a subject may
+/// have many teachers. Teacher records are reused — never duplicated.
+model TeacherSubject {
+  id        String   @id @default(uuid())
+  teacherId String
+  subjectId String
+  createdAt DateTime @default(now())
+
+  teacher Teacher @relation(fields: [teacherId], references: [id])
+  subject Subject @relation(fields: [subjectId], references: [id])
+
+  @@unique([teacherId, subjectId])
+  @@index([teacherId])
+  @@index([subjectId])
+}
+
+// A Group is a physical-room-free cohort of students: it belongs to
+// exactly one Grade, is optionally tied to ONE Subject (Stage -> Grade ->
+// Subject -> Group), has its own capacity and weekly Schedule, and is
+// optionally assigned a teacher. subjectId is nullable so groups that
+// existed before subjects were attached keep working unchanged. Group capacity is the only capacity
+// concept left in the system (Rooms were removed entirely).
+model Group {
+  id          String   @id @default(uuid())
+  branchId    String
+  gradeId     String
+  subjectId   String?
+  teacherId   String?
+  assistantId String?
+  name        String
+  capacity    Int
+  notes       String?
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  deletedAt   DateTime?
+
+  branch    Branch   @relation(fields: [branchId], references: [id])
+  grade     Grade    @relation(fields: [gradeId], references: [id])
+  subject   Subject? @relation(fields: [subjectId], references: [id])
+  teacher   Teacher? @relation("GroupTeacher", fields: [teacherId], references: [id])
+  assistant Teacher? @relation("GroupAssistant", fields: [assistantId], references: [id])
+
+  students    Student[]
+  schedules   Schedule[]
+  sessions    ClassSession[]
+  exams       Exam[]
+  assignments Assignment[]
+
+  // The same group name (e.g. "G1") may exist once per subject within a
+  // grade: Math/G1 and Physics/G1 are different groups. Postgres treats
+  // NULL subjectIds as distinct, so uniqueness for legacy subject-less
+  // groups is additionally enforced in the API layer.
+  @@unique([gradeId, subjectId, name])
+  @@index([branchId])
+  @@index([gradeId])
+  @@index([subjectId])
+  @@index([teacherId])
+  @@index([assistantId])
+}
+
+enum DayOfWeek {
+  SUNDAY
+  MONDAY
+  TUESDAY
+  WEDNESDAY
+  THURSDAY
+  FRIDAY
+  SATURDAY
+}
+
+// A recurring weekly time slot for a group. Times are stored as
+// minutes-from-midnight (0–1439) rather than DateTime so overlap math
+// is simple integer comparison, independent of any particular date or
+// timezone conversion. startMinutes < endMinutes is enforced in the
+// application layer (Zod + src/lib/scheduling.ts), since Postgres
+// CHECK constraints aren't expressed in this Prisma schema file —
+// add one in a migration if you want DB-level enforcement too.
+model Schedule {
+  id           String    @id @default(uuid())
+  groupId      String
+  dayOfWeek    DayOfWeek
+  startMinutes Int
+  endMinutes   Int
+  isActive     Boolean   @default(true)
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  group Group @relation(fields: [groupId], references: [id])
+
+  @@index([groupId])
+  @@index([dayOfWeek])
+}
+
+// Represents both TEACHER and TEACHER_ASSISTANT staff. `isAssistant`
+// distinguishes the two for UI/reporting; access control itself is
+// still driven by the linked User's Role (TEACHER vs TEACHER_ASSISTANT),
+// not by this flag — this flag is descriptive, not a security boundary.
+model Teacher {
+  id             String   @id @default(uuid())
+  organizationId String
+  branchId       String
+  userId         String?  @unique // optional: link to a User for dashboard login
+  fullName       String
+  photoUrl       String?
+  phone          String?
+  email          String?
+  isAssistant    Boolean  @default(false)
+  isActive       Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  deletedAt      DateTime?
+
+  branch          Branch  @relation(fields: [branchId], references: [id])
+  user            User?   @relation(fields: [userId], references: [id])
+  groupsAsTeacher   Group[] @relation("GroupTeacher")
+  groupsAsAssistant Group[] @relation("GroupAssistant")
+  teacherSubjects   TeacherSubject[]
+
+  @@index([organizationId])
+  @@index([branchId])
+}
+
+// ----------------------------------------------------------
+// STUDENTS & PARENTS
+// ----------------------------------------------------------
+
+// A Student belongs to exactly one Group (and therefore, transitively,
+// to exactly one Grade and one Stage). stageId/gradeId are kept
+// denormalized on the student row (written in the same transaction as
+// groupId) purely so stage/grade filters and reports never need to
+// join through Group — Group.gradeId / Grade.stageId remain the
+// source of truth and are re-validated on every write.
+model Student {
+  id                String    @id @default(uuid())
+  organizationId    String
+  branchId          String
+  studentCode       String    @unique // human-readable unique Student ID (also used as barcode payload)
+  qrCode            String    @unique // encoded value for QR/barcode scanning
+  fullName          String
+  photoUrl          String?
+  gender            Gender
+  dateOfBirth       DateTime?
+  phone             String?
+  address           String?
+  school            String?
+  stageId           String
+  gradeId           String
+  groupId           String
+  enrollmentDate    DateTime  @default(now())
+  status            StudentStatus @default(ACTIVE)
+  notes             String?
+  emergencyContact  String?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+  deletedAt         DateTime? // soft delete only — never hard-delete a student with history
+
+  branch Branch @relation(fields: [branchId], references: [id])
+  stage  Stage  @relation(fields: [stageId], references: [id])
+  grade  Grade  @relation(fields: [gradeId], references: [id])
+  group  Group  @relation(fields: [groupId], references: [id])
+
+  parents StudentParent[]
+
+  // Phase 5–8 relations
+  attendances           Attendance[]
+  examResults           ExamResult[]
+  recitations           Recitation[]
+  assignmentSubmissions AssignmentSubmission[]
+  subscriptions         Subscription[]
+  payments              Payment[]
+  invoices              Invoice[]
+
+  @@index([organizationId])
+  @@index([branchId])
+  @@index([studentCode])
+  @@index([fullName])
+  @@index([stageId])
+  @@index([gradeId])
+  @@index([groupId])
+}
+
+enum Gender {
+  MALE
+  FEMALE
+}
+
+enum StudentStatus {
+  ACTIVE
+  INACTIVE
+  SUSPENDED
+  GRADUATED
+}
+
+model Parent {
+  id                   String   @id @default(uuid())
+  fullName             String
+  phone                String   @unique
+  whatsappNumber       String?
+  preferredLanguage    String   @default("ar") // "ar" | "en"
+  notificationsEnabled Boolean  @default(true)
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+
+  students StudentParent[]
+}
+
+model StudentParent {
+  id           String @id @default(uuid())
+  studentId    String
+  parentId     String
+  relationship String // e.g. "Father", "Mother", "Guardian"
+  isPrimary    Boolean @default(true)
+
+  student Student @relation(fields: [studentId], references: [id])
+  parent  Parent  @relation(fields: [parentId], references: [id])
+
+  @@unique([studentId, parentId])
+  @@index([studentId])
+  @@index([parentId])
+}
+
+// ----------------------------------------------------------
+// EMPLOYEES (foundation only — full HR module is a later phase)
+// ----------------------------------------------------------
+
+model Employee {
+  id             String @id @default(uuid())
+  organizationId String
+  branchId       String
+  fullName  String
+  photoUrl  String?
+  phone     String?
+  position  String?
+  hireDate  DateTime?
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  deletedAt DateTime?
+
+  branch      Branch               @relation(fields: [branchId], references: [id])
+  attendances EmployeeAttendance[]
+
+  @@index([organizationId])
+  @@index([branchId])
+}
+
+// ----------------------------------------------------------
+// AUDIT LOG — mandatory, tamper-resistant from normal users
+// ----------------------------------------------------------
+
+model AuditLog {
+  id             String   @id @default(uuid())
+  organizationId String
+  actorUserId    String?
+  action         String   // e.g. "UPDATE_PAYMENT", "DELETE_STUDENT"
+  entityType     String   // e.g. "Payment", "Student"
+  entityId       String?
+  beforeValue    Json?
+  afterValue     Json?
+  reason         String?
+  ipAddress      String?
+  createdAt      DateTime @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+  actor        User?        @relation("AuditActor", fields: [actorUserId], references: [id])
+
+  @@index([organizationId])
+  @@index([entityType, entityId])
+  @@index([createdAt])
+}
+
+// ----------------------------------------------------------
+// SYSTEM SETTINGS
+// ----------------------------------------------------------
+
+model SystemSetting {
+  id             String   @id @default(uuid())
+  organizationId String
+  key            String
+  value          Json
+  updatedAt      DateTime @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+
+  @@unique([organizationId, key])
+}
+
+// ==========================================================
+// PHASE 5 — CLASS SESSIONS & ATTENDANCE
+// ==========================================================
+
+enum SessionStatus {
+  SCHEDULED
+  OPEN
+  COMPLETED
+  CANCELLED
+}
+
+/// A concrete, dated occurrence of a group's weekly Schedule slot.
+/// Attendance is always attached to a real session, never to a group
+/// directly — this is what makes "duplicate attendance" (Rule 1) a
+/// database-level guarantee via the unique index on Attendance.
+model ClassSession {
+  id             String        @id @default(uuid())
+  organizationId String
+  branchId       String
+  groupId        String
+  scheduleId     String?
+  teacherId      String?
+  assistantId    String?
+  date           DateTime      @db.Date
+  startMinutes   Int
+  endMinutes     Int
+  status         SessionStatus @default(SCHEDULED)
+  notes          String?
+  openedAt       DateTime?
+  closedAt       DateTime?
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  group       Group        @relation(fields: [groupId], references: [id])
+  attendances Attendance[]
+
+  // One session per group per date per start time — prevents accidental
+  // double generation when the schedule generator is run twice.
+  @@unique([groupId, date, startMinutes])
+  @@index([organizationId])
+  @@index([branchId])
+  @@index([date])
+  @@index([status])
+}
+
+enum AttendanceType {
+  REGULAR
+  MAKE_UP
+  LATE
+  EXCUSED
+  ABSENT
+}
+
+model Attendance {
+  id             String         @id @default(uuid())
+  organizationId String
+  branchId       String
+  sessionId      String
+  studentId      String
+  groupId        String
+  type           AttendanceType
+  recordedAt     DateTime       @default(now())
+  operatorUserId String?
+  deviceInfo     String?
+  notes          String?
+
+  // Make-up bookkeeping (spec §10): when `type = MAKE_UP`, groupId above
+  // is the group actually attended (the session's group) and
+  // originGroupId is the student's own (home) group at the time of the
+  // scan — denormalized here because Student.groupId can change later
+  // and this row must stay historically accurate. makeUpApprovedBy is
+  // the operator who accepted the "Student belongs to another group"
+  // confirmation dialog.
+  makeUpReason      String?
+  makeUpApprovedBy  String?
+  originGroupId     String?
+  originSessionId   String? // optional: the specific session the student originally missed, if known
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime? // attendance history is never hard-deleted
+
+  session     ClassSession           @relation(fields: [sessionId], references: [id])
+  student     Student                @relation(fields: [studentId], references: [id])
+  adjustments AttendanceAdjustment[]
+
+  // Rule 1 — a student cannot have duplicate attendance for one session.
+  @@unique([sessionId, studentId])
+  @@index([organizationId])
+  @@index([branchId])
+  @@index([studentId])
+  @@index([groupId])
+  @@index([recordedAt])
+}
+
+/// Immutable trail of every change made to an attendance record
+/// (spec §18). Insert-only: there is no update/delete API for this table.
+model AttendanceAdjustment {
+  id            String   @id @default(uuid())
+  attendanceId  String
+  actorUserId   String?
+  action        String // UPDATE | DELETE | RESTORE
+  previousValue Json?
+  newValue      Json?
+  reason        String
+  createdAt     DateTime @default(now())
+
+  attendance Attendance @relation(fields: [attendanceId], references: [id])
+
+  @@index([attendanceId])
+  @@index([createdAt])
+}
+
+// ==========================================================
+// PHASE 6 — EXAMS, GRADES, RECITATION, ASSIGNMENTS
+// ==========================================================
+
+model Exam {
+  id              String    @id @default(uuid())
+  organizationId  String
+  branchId        String
+  subjectId       String
+  groupId         String
+  name            String
+  date            DateTime
+  maxScore        Decimal   @db.Decimal(6, 2)
+  durationMinutes Int?
+  description     String?
+  isPublished     Boolean   @default(false)
+  publishedAt     DateTime?
+  createdById     String?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  deletedAt       DateTime?
+
+  subject Subject      @relation(fields: [subjectId], references: [id])
+  group   Group        @relation(fields: [groupId], references: [id])
+  results ExamResult[]
+
+  @@index([organizationId])
+  @@index([groupId])
+  @@index([subjectId])
+  @@index([date])
+}
+
+model ExamResult {
+  id            String   @id @default(uuid())
+  examId        String
+  studentId     String
+  score         Decimal? @db.Decimal(6, 2) // null while ungraded
+  isAbsent      Boolean  @default(false)
+  notes         String?
+  enteredById   String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  exam    Exam    @relation(fields: [examId], references: [id])
+  student Student @relation(fields: [studentId], references: [id])
+
+  @@unique([examId, studentId])
+  @@index([studentId])
+}
+
+enum RecitationStatus {
+  COMPLETED
+  PARTIAL
+  NOT_COMPLETED
+  ABSENT
+}
+
+model Recitation {
+  id             String           @id @default(uuid())
+  organizationId String
+  studentId      String
+  subjectId      String?
+  groupId        String?
+  teacherId      String?
+  date           DateTime
+  content        String
+  score          Decimal?         @db.Decimal(5, 2)
+  maxScore       Decimal          @default(10) @db.Decimal(5, 2)
+  status         RecitationStatus
+  notes          String?
+  createdById    String?
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
+
+  student Student @relation(fields: [studentId], references: [id])
+
+  @@index([organizationId])
+  @@index([studentId])
+  @@index([date])
+}
+
+model Assignment {
+  id             String    @id @default(uuid())
+  organizationId String
+  branchId       String
+  groupId        String
+  subjectId      String? // free-form label; Group no longer carries a subject
+  title          String
+  description    String?
+  dueDate        DateTime
+  maxScore       Decimal   @db.Decimal(6, 2)
+  createdById    String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+  deletedAt      DateTime?
+
+  group       Group                  @relation(fields: [groupId], references: [id])
+  submissions AssignmentSubmission[]
+
+  @@index([organizationId])
+  @@index([groupId])
+  @@index([dueDate])
+}
+
+enum SubmissionStatus {
+  PENDING
+  SUBMITTED
+  LATE
+  GRADED
+  MISSING
+}
+
+model AssignmentSubmission {
+  id           String           @id @default(uuid())
+  assignmentId String
+  studentId    String
+  status       SubmissionStatus @default(PENDING)
+  submittedAt  DateTime?
+  grade        Decimal?         @db.Decimal(6, 2)
+  feedback     String?
+  gradedById   String?
+  createdAt    DateTime         @default(now())
+  updatedAt    DateTime         @updatedAt
+
+  assignment Assignment @relation(fields: [assignmentId], references: [id])
+  student    Student    @relation(fields: [studentId], references: [id])
+
+  @@unique([assignmentId, studentId])
+  @@index([studentId])
+}
+
+// ==========================================================
+// PHASE 7 — SUBSCRIPTIONS, PAYMENTS, INVOICES
+// ==========================================================
+
+/// Configurable monthly subscription fee per Stage (spec §17).
+/// Fees are never hard-coded: Settings → Subscription Fees lets an
+/// admin add/edit/activate/deactivate a fee per Stage, each with an
+/// effective date. `billing.currentStageFee()` always resolves the
+/// active row for a Stage as of "now" (or a given date).
+model SubscriptionFee {
+  id             String    @id @default(uuid())
+  organizationId String
+  stageId        String
+  amount         Decimal   @db.Decimal(10, 2)
+  isActive       Boolean   @default(true)
+  effectiveFrom  DateTime  @default(now())
+  notes          String?
+  createdById    String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  stage Stage @relation(fields: [stageId], references: [id])
+
+  @@index([organizationId])
+  @@index([stageId])
+  @@index([isActive])
+}
+
+enum SubscriptionStatus {
+  PAID
+  PARTIAL
+  UNPAID
+  OVERDUE
+  WAIVED
+}
+
+/// A monthly tuition charge for a student (optionally per group/subject).
+/// `paidAmount` is a derived cache kept in sync inside the same
+/// transaction as every allocation, so financial screens never have to
+/// aggregate the whole payment history to render a status.
+model Subscription {
+  id             String             @id @default(uuid())
+  organizationId String
+  branchId       String
+  studentId      String
+  groupId        String?
+  subjectId      String?
+  periodYear     Int
+  periodMonth    Int // 1–12
+  amount         Decimal            @db.Decimal(10, 2)
+  discount       Decimal            @default(0) @db.Decimal(10, 2)
+  paidAmount     Decimal            @default(0) @db.Decimal(10, 2)
+  dueDate        DateTime
+  status         SubscriptionStatus @default(UNPAID)
+  notes          String?
+  createdAt      DateTime           @default(now())
+  updatedAt      DateTime           @updatedAt
+
+  student     Student             @relation(fields: [studentId], references: [id])
+  allocations PaymentAllocation[]
+
+  // NOTE: Postgres treats NULLs as distinct in unique indexes, so this
+  // prevents duplicates for group-scoped subscriptions. General (no
+  // group) duplicates are additionally blocked in the API layer.
+  @@unique([studentId, groupId, periodYear, periodMonth])
+  @@index([organizationId])
+  @@index([branchId])
+  @@index([status])
+  @@index([periodYear, periodMonth])
+}
+
+enum PaymentMethod {
+  CASH
+  BANK_TRANSFER
+  CARD
+  OTHER
+}
+
+enum PaymentStatus {
+  COMPLETED
+  VOIDED
+  REFUNDED
+  PARTIALLY_REFUNDED
+}
+
+/// Financial records are never deleted (Rule 6). Corrections happen via
+/// VOID / REFUND transitions, each of which requires a reason and writes
+/// an audit log entry.
+model Payment {
+  id             String        @id @default(uuid())
+  organizationId String
+  branchId       String
+  studentId      String
+  amount         Decimal       @db.Decimal(10, 2)
+  refundedAmount Decimal       @default(0) @db.Decimal(10, 2)
+  method         PaymentMethod
+  status         PaymentStatus @default(COMPLETED)
+  receiptNumber  String        @unique
+  paidAt         DateTime      @default(now())
+  notes          String?
+  recordedById   String?
+  voidedById     String?
+  voidedAt       DateTime?
+  voidReason     String?
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  student     Student             @relation(fields: [studentId], references: [id])
+  allocations PaymentAllocation[]
+  invoice     Invoice?
+
+  @@index([organizationId])
+  @@index([branchId])
+  @@index([studentId])
+  @@index([paidAt])
+  @@index([status])
+}
+
+model PaymentAllocation {
+  id             String   @id @default(uuid())
+  paymentId      String
+  subscriptionId String
+  amount         Decimal  @db.Decimal(10, 2)
+  createdAt      DateTime @default(now())
+
+  payment      Payment      @relation(fields: [paymentId], references: [id])
+  subscription Subscription @relation(fields: [subscriptionId], references: [id])
+
+  @@index([paymentId])
+  @@index([subscriptionId])
+}
+
+enum InvoiceStatus {
+  ISSUED
+  VOID
+}
+
+model Invoice {
+  id              String        @id @default(uuid())
+  organizationId  String
+  invoiceNumber   String        @unique
+  paymentId       String        @unique
+  studentId       String
+  issuedAt        DateTime      @default(now())
+  totalAmount     Decimal       @db.Decimal(10, 2)
+  paidAmount      Decimal       @db.Decimal(10, 2)
+  remainingAmount Decimal       @default(0) @db.Decimal(10, 2)
+  description     String?
+  status          InvoiceStatus @default(ISSUED)
+  voidReason      String?
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  payment Payment @relation(fields: [paymentId], references: [id])
+  student Student @relation(fields: [studentId], references: [id])
+
+  @@index([organizationId])
+  @@index([studentId])
+  @@index([issuedAt])
+}
+
+// ==========================================================
+// PHASE 8 — EXPENSES & UTILITIES
+// ==========================================================
+
+enum ExpenseCategory {
+  ELECTRICITY
+  WATER
+  INTERNET
+  RENT
+  SALARIES
+  MAINTENANCE
+  CLEANING
+  EQUIPMENT
+  SUPPLIES
+  OTHER
+}
+
+model Expense {
+  id             String          @id @default(uuid())
+  organizationId String
+  branchId       String
+  category       ExpenseCategory
+  amount         Decimal         @db.Decimal(10, 2)
+  spentAt        DateTime
+  vendor         String?
+  description    String?
+  attachmentUrl  String?
+  method         PaymentMethod   @default(CASH)
+  paidByUserId   String?
+  createdById    String?
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+  deletedAt      DateTime?
+
+  @@index([organizationId])
+  @@index([branchId])
+  @@index([category])
+  @@index([spentAt])
+}
+
+enum UtilityType {
+  ELECTRICITY
+  WATER
+}
+
+enum UtilityBillStatus {
+  UNPAID
+  PAID
+  OVERDUE
+}
+
+model UtilityBill {
+  id              String            @id @default(uuid())
+  organizationId  String
+  branchId        String
+  type            UtilityType
+  meterNumber     String
+  periodStart     DateTime
+  periodEnd       DateTime
+  previousReading Decimal           @db.Decimal(12, 2)
+  currentReading  Decimal           @db.Decimal(12, 2)
+  consumption     Decimal           @db.Decimal(12, 2)
+  amount          Decimal           @db.Decimal(10, 2)
+  dueDate         DateTime
+  paidAt          DateTime?
+  status          UtilityBillStatus @default(UNPAID)
+  attachmentUrl   String?
+  expenseId       String? // set when the bill is pushed into Expenses
+  notes           String?
+  createdById     String?
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+
+  @@unique([branchId, type, meterNumber, periodStart])
+  @@index([organizationId])
+  @@index([type])
+  @@index([status])
+  @@index([dueDate])
+}
+
+enum EmployeeAttendanceStatus {
+  PRESENT
+  LATE
+  ABSENT
+  EARLY_LEAVE
+  OVERTIME
+}
+
+model EmployeeAttendance {
+  id             String                   @id @default(uuid())
+  organizationId String
+  branchId       String
+  employeeId     String
+  date           DateTime                 @db.Date
+  checkInAt      DateTime?
+  checkOutAt     DateTime?
+  status         EmployeeAttendanceStatus
+  lateMinutes    Int                      @default(0)
+  totalMinutes   Int                      @default(0)
+  notes          String?
+  recordedById   String?
+  createdAt      DateTime                 @default(now())
+  updatedAt      DateTime                 @updatedAt
+
+  employee Employee @relation(fields: [employeeId], references: [id])
+
+  @@unique([employeeId, date])
+  @@index([organizationId])
+  @@index([branchId])
+  @@index([date])
+}
+
+// ==========================================================
+// PHASE 9 — NOTIFICATIONS & WHATSAPP
+// ==========================================================
+
+enum NotificationType {
+  ATTENDANCE
+  PAYMENT
+  EXAM
+  ACADEMIC
+  ADMINISTRATIVE
+  SYSTEM
+}
+
+enum NotificationChannel {
+  IN_APP
+  WHATSAPP
+  EMAIL
+}
+
+model Notification {
+  id             String              @id @default(uuid())
+  organizationId String
+  userId         String? // in-app recipient
+  studentId      String?
+  parentId       String?
+  type           NotificationType
+  channel        NotificationChannel @default(IN_APP)
+  title          String
+  body           String
+  meta           Json?
+  isRead         Boolean             @default(false)
+  readAt         DateTime?
+  createdAt      DateTime            @default(now())
+
+  @@index([organizationId])
+  @@index([userId, isRead])
+  @@index([createdAt])
+}
+
+model NotificationTemplate {
+  id             String              @id @default(uuid())
+  organizationId String
+  key            String // e.g. "attendance.absent"
+  locale         String // "ar" | "en"
+  channel        NotificationChannel
+  type           NotificationType
+  name           String
+  subject        String?
+  /// Body with {{placeholders}} — rendered by src/lib/templates.ts
+  body           String
+  /// Name of the approved template registered with the WhatsApp provider.
+  providerTemplateName String?
+  isActive       Boolean             @default(true)
+  createdAt      DateTime            @default(now())
+  updatedAt      DateTime            @updatedAt
+
+  @@unique([organizationId, key, locale, channel])
+  @@index([organizationId])
+}
+
+enum WhatsAppMessageStatus {
+  QUEUED
+  SENDING
+  SENT
+  DELIVERED
+  READ
+  FAILED
+}
+
+model WhatsAppMessage {
+  id               String                @id @default(uuid())
+  organizationId   String
+  toNumber         String
+  locale           String                @default("ar")
+  templateKey      String?
+  body             String
+  status           WhatsAppMessageStatus @default(QUEUED)
+  providerMessageId String?
+  errorMessage     String?
+  attempts         Int                   @default(0)
+  nextAttemptAt    DateTime?
+  studentId        String?
+  parentId         String?
+  createdById      String?
+  sentAt           DateTime?
+  deliveredAt      DateTime?
+  createdAt        DateTime              @default(now())
+  updatedAt        DateTime              @updatedAt
+
+  @@index([organizationId])
+  @@index([status, nextAttemptAt])
+  @@index([createdAt])
+}
+
+enum NotificationEvent {
+  STUDENT_ABSENT
+  STUDENT_LATE
+  REPEATED_ABSENCE
+  PAYMENT_OVERDUE
+  PAYMENT_RECEIVED
+  EXAM_PUBLISHED
+  ANNOUNCEMENT
+}
+
+model NotificationRule {
+  id             String              @id @default(uuid())
+  organizationId String
+  event          NotificationEvent
+  channel        NotificationChannel
+  templateKey    String
+  isEnabled      Boolean             @default(true)
+  config         Json? // e.g. { "absenceThreshold": 3 }
+  createdAt      DateTime            @default(now())
+  updatedAt      DateTime            @updatedAt
+
+  @@unique([organizationId, event, channel])
+  @@index([organizationId])
+}
+
+// ==========================================================
+// FILES
+// ==========================================================
+
+model FileAsset {
+  id             String   @id @default(uuid())
+  organizationId String
+  storageKey     String   @unique
+  url            String
+  originalName   String
+  mimeType       String
+  sizeBytes      Int
+  checksum       String?
+  uploadedById   String?
+  createdAt      DateTime @default(now())
+
+  @@index([organizationId])
+}

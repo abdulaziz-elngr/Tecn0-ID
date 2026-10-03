@@ -1,0 +1,79 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light;
+}
+
+.dark {
+  color-scheme: dark;
+}
+
+body {
+  @apply bg-surface-light text-tecno-ink dark:bg-surface-dark dark:text-white;
+  font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+}
+
+/* Logical-direction-aware focus ring for accessibility */
+:focus-visible {
+  outline: 2px solid #F0B429;
+  outline-offset: 2px;
+}
+
+.card {
+  @apply rounded-card border border-black/5 bg-white shadow-card dark:border-white/10 dark:bg-surface-dark-muted;
+}
+
+.btn-primary {
+  @apply inline-flex items-center justify-center rounded-lg bg-tecno-gold px-4 py-2 font-semibold text-tecno-ink transition hover:bg-tecno-gold-dark focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50;
+}
+
+.input {
+  @apply w-full rounded-lg border border-black/10 bg-white px-3 py-2 text-sm outline-none focus:border-tecno-gold dark:border-white/10 dark:bg-surface-dark-muted dark:text-white;
+}
+
+.btn-secondary {
+  @apply inline-flex items-center justify-center rounded-lg border border-black/10 px-4 py-2 text-sm font-medium transition hover:bg-black/5 disabled:opacity-50 dark:border-white/10 dark:hover:bg-white/5;
+}
+
+.label {
+  @apply text-sm font-medium;
+}
+
+/* Print styles for invoices, receipts and student cards (§31, §9) */
+@media print {
+  .no-print {
+    display: none !important;
+  }
+  .print-sheet {
+    box-shadow: none !important;
+    border: none !important;
+  }
+  body {
+    background: #ffffff !important;
+    color: #000000 !important;
+  }
+
+  /* Thermal sticker layout for student barcode cards (spec §6).
+     Two configurable sizes — switch with the print-size-* class on
+     .print-sheet from the print settings on the Student Card page. */
+  .print-size-40x30 {
+    width: 40mm !important;
+    max-width: 40mm !important;
+  }
+  .print-size-58x40 {
+    width: 58mm !important;
+    max-width: 58mm !important;
+  }
+  @page {
+    size: auto;
+    margin: 2mm;
+  }
+
+  /* Thermal receipt layout (spec §19) — narrow roll width. */
+  .print-receipt {
+    width: 80mm !important;
+    max-width: 80mm !important;
+  }
+}
