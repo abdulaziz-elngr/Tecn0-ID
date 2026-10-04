@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useState } from "react";
 import { useI18n } from "@/lib/i18n";
 import { apiPatch, apiPost, useApi } from "@/lib/client";
@@ -40,38 +41,6 @@ export default function SettingsPage() {
   const { t } = useI18n();
   const toast = useToast();
   const { data, loading, error, reload } = useApi<SettingsData>("/api/settings");
-
-  const { data: stages } = useApi<{ id: string; name: string; isActive: boolean }[]>("/api/stages");
-  const { data: fees, reload: reloadFees } = useApi<
-    { id: string; amount: string; isActive: boolean; effectiveFrom: string; stage: { id: string; name: string } }[]
-  >("/api/settings/fees");
-  const [feeDraft, setFeeDraft] = useState<Record<string, string>>({});
-  const [savingFee, setSavingFee] = useState<string | null>(null);
-
-  async function saveFee(stageId: string) {
-    const amount = Number(feeDraft[stageId]);
-    if (!amount || amount <= 0) return;
-    setSavingFee(stageId);
-    try {
-      await apiPost("/api/settings/fees", { stageId, amount });
-      toast.success(t("common.saved"));
-      setFeeDraft((d) => ({ ...d, [stageId]: "" }));
-      reloadFees();
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Failed to save fee.");
-    } finally {
-      setSavingFee(null);
-    }
-  }
-
-  async function toggleFeeActive(fee: { id: string; isActive: boolean }) {
-    try {
-      await apiPatch(`/api/settings/fees/${fee.id}`, { isActive: !fee.isActive });
-      reloadFees();
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Failed to update fee.");
-    }
-  }
 
   const [form, setForm] = useState<SettingsData | null>(null);
   const [saving, setSaving] = useState<string | null>(null);
@@ -237,81 +206,19 @@ export default function SettingsPage() {
         </button>
       </section>
 
-      <section className="card space-y-3 p-4">
+      <section className="card space-y-2 p-4">
         <h2 className="font-semibold">{t("settings.fees")}</h2>
-        <p className="text-xs text-black/50 dark:text-white/50">
-          Configured per Stage — never hard-coded. Adding a new fee for a stage automatically deactivates its
-          previous fee.
+        <p className="text-sm text-black/60 dark:text-white/60">
+          {t("sub.pricesTitle")}: {t("sub.stage")} → {t("sub.grade")} → {t("sub.price")}
         </p>
-        <div className="overflow-x-auto">
-          <table className="w-full text-start text-sm">
-            <thead className="border-b border-black/5 text-black/60 dark:border-white/10 dark:text-white/60">
-              <tr>
-                <th className="p-2 text-start">{t("nav.stages")}</th>
-                <th className="p-2 text-start">Current fee</th>
-                <th className="p-2 text-start">{t("common.status")}</th>
-                <th className="p-2 text-start">New amount</th>
-              </tr>
-            </thead>
-            <tbody>
-              {(stages ?? [])
-                .filter((s) => s.isActive)
-                .map((stage) => {
-                  const stageFees = (fees ?? []).filter((f) => f.stage.id === stage.id);
-                  const active = stageFees.find((f) => f.isActive);
-                  return (
-                    <tr key={stage.id} className="border-b border-black/5 dark:border-white/5">
-                      <td className="p-2 font-medium">{stage.name}</td>
-                      <td className="p-2">{active ? `${active.amount}` : "—"}</td>
-                      <td className="p-2">
-                        {active && (
-                          <button type="button" onClick={() => toggleFeeActive(active)}>
-                            <Badge tone="success">{t("common.active")}</Badge>
-                          </button>
-                        )}
-                      </td>
-                      <td className="p-2">
-                        <div className="flex gap-2">
-                          <input
-                            className="input w-28 py-1"
-                            type="number"
-                            min={0}
-                            value={feeDraft[stage.id] ?? ""}
-                            onChange={(e) => setFeeDraft((d) => ({ ...d, [stage.id]: e.target.value }))}
-                          />
-                          <button
-                            type="button"
-                            className="btn-secondary px-3 py-1 text-xs"
-                            disabled={savingFee === stage.id}
-                            onClick={() => saveFee(stage.id)}
-                          >
-                            {t("common.save")}
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  );
-                })}
-            </tbody>
-          </table>
-        </div>
+        <Link href="/dashboard/finance/subscriptions" className="btn-secondary inline-block">
+          {t("sub.title")}
+        </Link>
       </section>
 
       <section className="card space-y-3 p-4">
         <h2 className="font-semibold">{t("settings.paymentRules")}</h2>
         <div className="grid gap-3 sm:grid-cols-2">
-          <Field label="Default monthly amount">
-            {(id) => (
-              <input
-                id={id}
-                type="number"
-                min={0}
-                className="input"
-                value={form.paymentRules.defaultMonthlyAmount}
-                onChange={(e) => setForm({ ...form, paymentRules: { ...form.paymentRules, defaultMonthlyAmount: Number(e.target.value) } })}
-              />
-            )}
-          </Field>
           <Field label="Due day of month">
             {(id) => (
               <input

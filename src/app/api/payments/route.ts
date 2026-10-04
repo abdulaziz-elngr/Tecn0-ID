@@ -139,6 +139,26 @@ export async function POST(request: NextRequest) {
       orderBy: [{ periodYear: "asc" }, { periodMonth: "asc" }]
     });
 
+    // Oldest-month-first: an explicit selection must be a prefix of everything
+    // still owing (no skipping an earlier unpaid month).
+    if (input.subscriptionIds) {
+      const allOwing = await db.subscription.findMany({
+        where: {
+          studentId: student.id,
+          organizationId: ctx.organizationId,
+          status: { in: ["UNPAID", "PARTIAL", "OVERDUE"] }
+        },
+        orderBy: [{ periodYear: "asc" }, { periodMonth: "asc" }],
+        select: { id: true }
+      });
+      const chosen = new Set(input.subscriptionIds);
+      const prefixLength = allOwing.findIndex((r) => !chosen.has(r.id));
+      const firstSkipped = prefixLength === -1 ? allOwing.length : prefixLength;
+      if (allOwing.slice(firstSkipped).some((r) => chosen.has(r.id))) {
+        throw new BusinessRuleError("A previous month is still unpaid.", { status: 409, code: "OUT_OF_ORDER" });
+      }
+    }
+
     const targets = outstanding.map((s) => ({
       subscriptionId: s.id,
       remaining: remainingAmount(Number(s.amount), Number(s.discount), Number(s.paidAmount))

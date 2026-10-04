@@ -17,6 +17,7 @@ import {
   type SnapshotWarning
 } from "./lesson-snapshot";
 import { remainingAmount } from "./billing";
+import { paymentWarningFor, type PaymentWarning } from "./payment-warning";
 import { DEFAULT_TIME_ZONE, sessionStartInstant } from "./tz";
 
 /**
@@ -230,6 +231,8 @@ export interface StudentLessonSnapshot {
   } | null;
   exam: { name: string; date: Date; score: number; maxScore: number; percent: number | null } | null;
   fees: { state: FeeState; remaining: number; periodYear: number; periodMonth: number } | null;
+  /** ALL unpaid subscription months (not only this lesson's month). Always present so attendance staff see it; null when nothing is owed. */
+  paymentWarning: PaymentWarning | null;
   /** Sections the viewer's role is not allowed to see (so the UI can say "restricted", not "none"). */
   hidden: { recitation: boolean; exam: boolean; fees: boolean };
   warnings: SnapshotWarning[];
@@ -284,7 +287,7 @@ export async function snapshotFor(
   const periodYear = session.date.getUTCFullYear();
   const periodMonth = session.date.getUTCMonth() + 1;
 
-  const [thisLesson, history, recitation, exam, subscriptions, thresholds] = await Promise.all([
+  const [thisLesson, history, recitation, exam, subscriptions, thresholds, paymentWarning] = await Promise.all([
     db.attendance.findFirst({
       where: { sessionId: session.id, studentId: student.id, deletedAt: null },
       select: { type: true, recordedAt: true }
@@ -332,7 +335,11 @@ export async function snapshotFor(
           select: { groupId: true, status: true, amount: true, discount: true, paidAmount: true }
         })
       : Promise.resolve([]),
-    getAnalyticsThresholds(ctx.organizationId)
+    getAnalyticsThresholds(ctx.organizationId),
+    paymentWarningFor(ctx.organizationId, student.id).catch((err) => {
+      console.error("[snapshot] payment warning failed", err);
+      return null;
+    })
   ]);
 
   const lastRow = history[0] ?? null;
@@ -394,6 +401,7 @@ export async function snapshotFor(
           }
         : null,
     fees: fee ? { ...fee, periodYear, periodMonth } : null,
+    paymentWarning,
     hidden: { recitation: !canRecitation, exam: !canExam, fees: !canFees },
     warnings: buildSnapshotWarnings({
       studentStatus: student.status,

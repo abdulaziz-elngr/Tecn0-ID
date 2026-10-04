@@ -32,12 +32,12 @@ export const PERMISSIONS = {
     "payments.update",
     "payments.refund",
     "payments.void",
+    "payments.reprint",
     "subscriptions.view",
     "subscriptions.manage",
     "invoices.view",
     "invoices.void"
   ],
-  expenses: ["expenses.view", "expenses.create", "expenses.update", "utilities.view", "utilities.manage"],
   exams: [
     "exams.view",
     "exams.create",
@@ -91,7 +91,6 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<string, string[]> = {
     ...PERMISSIONS.sessions,
     ...PERMISSIONS.attendance,
     ...PERMISSIONS.payments,
-    ...PERMISSIONS.expenses,
     ...PERMISSIONS.exams,
     ...PERMISSIONS.communication,
     ...PERMISSIONS.reports,
@@ -100,7 +99,6 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<string, string[]> = {
   ],
   ACCOUNTANT: [
     ...PERMISSIONS.payments,
-    ...PERMISSIONS.expenses,
     "students.view",
     "reports.view",
     "reports.financial.view",
@@ -144,6 +142,7 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<string, string[]> = {
     "attendance.create",
     "payments.view",
     "payments.create",
+    "payments.reprint",
     "subscriptions.view",
     "invoices.view",
     "notifications.view"

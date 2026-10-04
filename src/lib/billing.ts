@@ -95,10 +95,6 @@ export function collectionRate(collected: number, billed: number): number {
   return Math.round((collected / billed) * 1000) / 10;
 }
 
-export function netIncome(revenue: number, expenses: number): number {
-  return round2(revenue - expenses);
-}
-
 /**
  * Human-readable, per-organization sequential document numbers.
  *

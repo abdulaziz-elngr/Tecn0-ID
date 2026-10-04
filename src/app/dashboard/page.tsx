@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useI18n } from "@/lib/i18n";
 import { useApi, formatDateTime, formatMoneyClient } from "@/lib/client";
+import { OverdueNotices } from "@/components/payments/OverdueNotices";
 import { BarChart, Badge, ErrorNotice, PageHeader, StatCard } from "@/components/ui";
 
 /**
@@ -28,12 +29,10 @@ interface Stats {
   };
   finance?: {
     monthlyRevenue: number;
-    monthlyExpenses: number;
-    netIncome: number;
+    paidStudents: number;
+    unpaidStudents: number;
     outstanding: number;
-    collectionRate: number;
-    unpaidSubscriptions: number;
-    unpaidUtilityBills: number;
+    overdueMonths: number;
     todayPaymentsCount: number;
     todayPaymentsAmount: number;
   };
@@ -46,7 +45,7 @@ interface Stats {
     capacity: number;
     isFull: boolean;
   }[];
-  financeTrend?: { month: string; revenue: number; expenses: number }[];
+  financeTrend?: { month: string; revenue: number }[];
   upcomingExams?: {
     id: string;
     name: string;
@@ -69,11 +68,8 @@ export default function DashboardPage() {
 
   const alerts: string[] = [];
   if (data?.finance) {
-    if (data.finance.unpaidSubscriptions > 0) {
-      alerts.push(`${data.finance.unpaidSubscriptions} unpaid / overdue subscriptions`);
-    }
-    if (data.finance.unpaidUtilityBills > 0) {
-      alerts.push(`${data.finance.unpaidUtilityBills} unpaid utility bills`);
+    if (data.finance.overdueMonths > 0) {
+      alerts.push(`${data.finance.overdueMonths} overdue subscription months`);
     }
   }
   if (data?.attendanceToday && data.attendanceToday.absent > 0) {
@@ -93,6 +89,8 @@ export default function DashboardPage() {
           </Link>
         }
       />
+
+      <OverdueNotices />
 
       <ErrorNotice message={error} />
 
@@ -133,20 +131,13 @@ export default function DashboardPage() {
               value={formatMoneyClient(data.finance.monthlyRevenue)}
               tone="positive"
             />
-            <StatCard
-              label={t("dashboard.monthlyExpenses")}
-              value={formatMoneyClient(data.finance.monthlyExpenses)}
-            />
-            <StatCard
-              label={t("dashboard.netIncome")}
-              value={formatMoneyClient(data.finance.netIncome)}
-              tone={data.finance.netIncome >= 0 ? "positive" : "negative"}
-            />
+            <StatCard label={t("pay.paidStudents")} value={data.finance.paidStudents} tone="positive" />
+            <StatCard label={t("pay.unpaidStudents")} value={data.finance.unpaidStudents} tone="warning" />
             <StatCard
               label={t("dashboard.outstanding")}
               value={formatMoneyClient(data.finance.outstanding)}
-              hint={`${t("dashboard.collectionRate")}: ${data.finance.collectionRate}%`}
-              tone="warning"
+              hint={`${t("pay.overdueMonths")}: ${data.finance.overdueMonths}`}
+              tone="negative"
             />
             <StatCard
               label="Today's Payments"
@@ -154,7 +145,6 @@ export default function DashboardPage() {
               hint={formatMoneyClient(data.finance.todayPaymentsAmount)}
               tone="positive"
             />
-            <StatCard label="Unpaid Students" value={data.finance.unpaidSubscriptions} tone="warning" />
           </div>
         </section>
       )}
@@ -199,13 +189,9 @@ export default function DashboardPage() {
             <BarChart
               data={data.financeTrend.map((row) => ({
                 label: row.month.slice(5),
-                primary: row.revenue,
-                secondary: row.expenses
+                primary: row.revenue
               }))}
             />
-            <p className="mt-2 text-xs text-black/50 dark:text-white/50">
-              Gold = revenue, grey = expenses.
-            </p>
           </div>
         )}
 

@@ -66,10 +66,8 @@ const SECTIONS: NavSection[] = [
     items: [
       { href: "/dashboard/finance/subscriptions", key: "nav.subscriptions" },
       { href: "/dashboard/finance/payments", key: "nav.payments" },
-      { href: "/dashboard/finance/unpaid", key: "nav.unpaidStudents" },
-      { href: "/dashboard/finance/invoices", key: "nav.invoices" },
-      { href: "/dashboard/finance/expenses", key: "nav.expenses" },
-      { href: "/dashboard/finance/utilities", key: "nav.utilities" }
+      { href: "/dashboard/finance/records", key: "nav.paymentRecords" },
+      { href: "/dashboard/finance/invoices", key: "nav.invoices" }
     ]
   },
   {

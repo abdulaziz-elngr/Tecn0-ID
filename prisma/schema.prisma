@@ -253,6 +253,7 @@ model Grade {
   stage    Stage     @relation(fields: [stageId], references: [id])
   groups   Group[]
   students Student[]
+  fees     GradeFee[]
 
   @@unique([stageId, name])
   @@index([stageId])
@@ -888,6 +889,29 @@ model SubscriptionFee {
   @@index([isActive])
 }
 
+/// Monthly subscription price per Grade (Stage -> Grade -> Price).
+/// History is append-only: changing a price creates a NEW row and flips the
+/// previous one to isActive=false. Rows are never updated or deleted, and
+/// Subscription rows copy the amount when they are created, so changing a
+/// price can never alter a past payment.
+model GradeFee {
+  id             String   @id @default(uuid())
+  organizationId String
+  gradeId        String
+  amount         Decimal  @db.Decimal(10, 2)
+  isActive       Boolean  @default(true)
+  effectiveFrom  DateTime @default(now())
+  notes          String?
+  createdById    String?
+  createdAt      DateTime @default(now())
+
+  grade Grade @relation(fields: [gradeId], references: [id])
+
+  @@index([organizationId])
+  @@index([gradeId, effectiveFrom])
+  @@index([isActive])
+}
+
 enum SubscriptionStatus {
   PAID
   PARTIAL
@@ -964,6 +988,9 @@ model Payment {
   voidedById     String?
   voidedAt       DateTime?
   voidReason     String?
+  refundedById   String?
+  refundedAt     DateTime?
+  refundReason   String?
   createdAt      DateTime      @default(now())
   updatedAt      DateTime      @updatedAt
 
@@ -1022,7 +1049,11 @@ model Invoice {
 }
 
 // ==========================================================
-// PHASE 8 — EXPENSES & UTILITIES
+// PHASE 8 — EXPENSES & UTILITIES  (DEPRECATED — no code uses these)
+// The Expenses / Electricity / Water features were removed from the
+// application. The tables below are intentionally KEPT so any historical
+// financial rows already stored are never destroyed. They can be dropped
+// manually later, after the owner has exported the data.
 // ==========================================================
 
 enum ExpenseCategory {

@@ -33,6 +33,11 @@ export interface StudentSnapshot {
   } | null;
   exam: { name: string; date: string; score: number; maxScore: number; percent: number | null } | null;
   fees: { state: string; remaining: number; periodYear: number; periodMonth: number } | null;
+  paymentWarning?: {
+    currency: string;
+    totalDue: number;
+    months: { year: number; month: number; labelEn: string; labelAr: string; remaining: number; status: string }[];
+  } | null;
   hidden: { recitation: boolean; exam: boolean; fees: boolean };
   warnings: { code: string; severity: "info" | "warning" | "critical"; count?: number }[];
 }
@@ -83,6 +88,29 @@ export function StudentSnapshotCard({ snapshot }: { snapshot: StudentSnapshot })
         </div>
         <span className="text-xs text-black/50 dark:text-white/50">{t("scanner.studentCard")}</span>
       </div>
+
+      {snapshot.paymentWarning && snapshot.paymentWarning.months.length > 0 && (
+        <div
+          role="alert"
+          className="mb-2 rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-700 dark:text-red-300"
+        >
+          <p className="font-bold">
+            ⚠️ {locale === "ar" ? "اشتراكات شهرية غير مسددة" : "Unpaid Monthly Subscription"}
+          </p>
+          <ul className="mt-1 space-y-0.5">
+            {snapshot.paymentWarning.months.map((m) => (
+              <li key={`${m.year}-${m.month}`}>
+                {locale === "ar" ? m.labelAr : m.labelEn} — {m.remaining} {snapshot.paymentWarning!.currency}
+              </li>
+            ))}
+          </ul>
+          {snapshot.paymentWarning.months.length > 1 && (
+            <p className="mt-1 text-xs font-semibold">
+              {locale === "ar" ? "الإجمالي المستحق" : "Total due"}: {snapshot.paymentWarning.totalDue} {snapshot.paymentWarning.currency}
+            </p>
+          )}
+        </div>
+      )}
 
       {snapshot.warnings.length > 0 && (
         <ul className="mb-2 space-y-1">
