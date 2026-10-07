@@ -8,6 +8,7 @@ import { fmt, formatLessonDate, formatTimeRange, localizeError, monthLabel, pars
 import { currentLesson, nextLesson } from "@/lib/lesson-flow";
 import { Badge, ConfirmDialog, ErrorNotice, Field, PageHeader, useToast } from "@/components/ui";
 import { GroupPicker } from "@/components/GroupPicker";
+import { CameraScanner } from "@/components/CameraScanner";
 import { StudentSnapshotCard, type StudentSnapshot } from "@/components/StudentSnapshotCard";
 
 /**
@@ -161,6 +162,7 @@ export default function ScannerPage() {
   const [pendingCode, setPendingCode] = useState<string | null>(null);
   const [makeUpReason, setMakeUpReason] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
+  const [cameraOpen, setCameraOpen] = useState(false);
 
   // -- Manual attendance (spec §11): search by name/ID/phone/parent phone --
   const [mode, setMode] = useState<"SCAN" | "MANUAL">("SCAN");
@@ -208,7 +210,12 @@ export default function ScannerPage() {
     }
   }
 
-  const refocus = useCallback(() => inputRef.current?.focus(), []);
+  const refocus = useCallback(() => {
+    if (!cameraOpen) inputRef.current?.focus();
+  }, [cameraOpen]);
+  useEffect(() => {
+    if (!isOpen || mode !== "SCAN") setCameraOpen(false);
+  }, [isOpen, mode]);
   useEffect(() => {
     if (isOpen && mode === "SCAN") refocus();
   }, [refocus, sessionId, isOpen, mode]);
@@ -422,7 +429,9 @@ export default function ScannerPage() {
                       inputMode="text"
                       disabled={busy || needsConfirmation}
                       onChange={(e) => setCode(e.target.value)}
-                      onBlur={() => setTimeout(refocus, 80)}
+                      onBlur={() => {
+                        if (!cameraOpen) setTimeout(refocus, 80);
+                      }}
                       placeholder={t("scanner.placeholder")}
                     />
                   )}
@@ -430,6 +439,33 @@ export default function ScannerPage() {
                 <button type="submit" className="btn-primary mt-4 w-full py-3 text-base" disabled={busy || needsConfirmation}>
                   {busy ? t("common.loading") : t("common.confirm")}
                 </button>
+                <button
+                  type="button"
+                  className="btn-secondary mt-3 w-full py-3 text-base"
+                  onClick={() => setCameraOpen((v) => !v)}
+                  disabled={needsConfirmation}
+                >
+                  📷 {cameraOpen ? t("scanner.camera.close") : t("scanner.camera.open")}
+                </button>
+                {cameraOpen && (
+                  <CameraScanner
+                    paused={busy || needsConfirmation}
+                    onDetect={(c) => {
+                      if (!sessionId || busy || !isOpen) return;
+                      void runScan(c, false);
+                    }}
+                    onClose={() => setCameraOpen(false)}
+                    labels={{
+                      starting: t("scanner.camera.starting"),
+                      denied: t("scanner.camera.denied"),
+                      unsupported: t("scanner.camera.unsupported"),
+                      noCamera: t("scanner.camera.noCamera"),
+                      insecure: t("scanner.camera.insecure"),
+                      hint: t("scanner.camera.hint"),
+                      close: t("scanner.camera.close")
+                    }}
+                  />
+                )}
               </form>
             )}
 
