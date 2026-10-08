@@ -335,6 +335,7 @@ model Group {
   lessonPlans LessonPlan[]
   exams       Exam[]
   assignments Assignment[]
+  recitationSessions RecitationSession[]
 
   // The same group name (e.g. "G1") may exist once per subject within a
   // grade: Math/G1 and Physics/G1 are different groups. Postgres treats
@@ -459,6 +460,7 @@ model Student {
   subscriptions         Subscription[]
   payments              Payment[]
   invoices              Invoice[]
+  recognitions          StudentRecognition[]
 
   @@index([organizationId])
   @@index([branchId])
@@ -619,6 +621,9 @@ model ClassSession {
   group       Group        @relation(fields: [groupId], references: [id])
   plan        LessonPlan?  @relation(fields: [planId], references: [id])
   attendances Attendance[]
+  // Stage 3 — performance pages: a lesson can carry one recitation and homework.
+  recitationSession RecitationSession?
+  assignments       Assignment[]
 
   // One session per group per date per start time — prevents accidental
   // double generation when the schedule generator is run twice.
@@ -801,13 +806,47 @@ model Recitation {
   status         RecitationStatus
   notes          String?
   createdById    String?
+  // Stage 3 — set when the row is a student's result inside a RecitationSession
+  // (the new per-lesson recitation flow). NULL for free-form legacy records.
+  recitationSessionId String?
   createdAt      DateTime         @default(now())
   updatedAt      DateTime         @updatedAt
 
   student Student @relation(fields: [studentId], references: [id])
+  recitationSession RecitationSession? @relation(fields: [recitationSessionId], references: [id])
 
+  // One result per student per recitation session (NULLs never clash, so
+  // legacy rows are unaffected).
+  @@unique([recitationSessionId, studentId])
   @@index([organizationId])
   @@index([studentId])
+  @@index([date])
+}
+
+/// Stage 3 — a recitation (تسميع) held for ONE group during ONE lesson
+/// (ClassSession). It fixes the maximum score; each student's result is a
+/// Recitation row pointing back here. One recitation per lesson.
+model RecitationSession {
+  id             String   @id @default(uuid())
+  organizationId String
+  branchId       String
+  groupId        String
+  sessionId      String
+  title          String?
+  date           DateTime @db.Date
+  maxScore       Decimal  @default(10) @db.Decimal(5, 2)
+  notes          String?
+  createdById    String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  group   Group        @relation(fields: [groupId], references: [id])
+  session ClassSession @relation(fields: [sessionId], references: [id])
+  records Recitation[]
+
+  @@unique([sessionId])
+  @@index([organizationId])
+  @@index([groupId])
   @@index([date])
 }
 
@@ -821,16 +860,21 @@ model Assignment {
   description    String?
   dueDate        DateTime
   maxScore       Decimal   @db.Decimal(6, 2)
+  // Stage 3 — the lesson (ClassSession) this homework belongs to. NULL for
+  // assignments created before the homework page was reworked.
+  sessionId      String?
   createdById    String?
   createdAt      DateTime  @default(now())
   updatedAt      DateTime  @updatedAt
   deletedAt      DateTime?
 
   group       Group                  @relation(fields: [groupId], references: [id])
+  session     ClassSession?          @relation(fields: [sessionId], references: [id])
   submissions AssignmentSubmission[]
 
   @@index([organizationId])
   @@index([groupId])
+  @@index([sessionId])
   @@index([dueDate])
 }
 
@@ -859,6 +903,26 @@ model AssignmentSubmission {
 
   @@unique([assignmentId, studentId])
   @@index([studentId])
+}
+
+/// Stage 3 — a teacher/admin recognising a student (Student performance page).
+/// Insert-only history: who was recognised, why, when, and any notes.
+model StudentRecognition {
+  id             String   @id @default(uuid())
+  organizationId String
+  branchId       String
+  studentId      String
+  reason         String
+  recognizedAt   DateTime @db.Date
+  notes          String?
+  createdById    String?
+  createdAt      DateTime @default(now())
+
+  student Student @relation(fields: [studentId], references: [id])
+
+  @@index([organizationId])
+  @@index([studentId])
+  @@index([recognizedAt])
 }
 
 // ==========================================================

@@ -5,6 +5,7 @@ import { requirePermission } from "@/lib/rbac";
 import { handleApiError, ok, readJson, NotFoundError, BusinessRuleError } from "@/lib/api";
 import { writeAuditLog } from "@/lib/audit";
 import { computeExamStatistics, rankScores } from "@/lib/grading";
+import { loadAccessibleGroup } from "@/lib/group-access";
 
 const patchSchema = z.object({
   name: z.string().trim().min(2).max(150).optional(),
@@ -34,6 +35,7 @@ export async function GET(_request: NextRequest, { params }: { params: { id: str
       }
     });
     if (!exam) throw new NotFoundError("Exam not found.");
+    await loadAccessibleGroup(ctx, exam.group.id);
 
     const maxScore = Number(exam.maxScore);
     const entries = exam.results.map((r) => ({
@@ -82,6 +84,7 @@ export async function PATCH(request: NextRequest, { params }: { params: { id: st
       }
     });
     if (!existing) throw new NotFoundError("Exam not found.");
+    await loadAccessibleGroup(ctx, existing.groupId);
 
     const input = await readJson(request, patchSchema);
 
@@ -138,6 +141,7 @@ export async function DELETE(request: NextRequest, { params }: { params: { id: s
       }
     });
     if (!existing) throw new NotFoundError("Exam not found.");
+    await loadAccessibleGroup(ctx, existing.groupId);
 
     const input = await readJson(request, z.object({ reason: z.string().trim().min(3).max(500) }));
 

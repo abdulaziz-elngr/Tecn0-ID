@@ -5,6 +5,7 @@ import { requirePermission } from "@/lib/rbac";
 import { handleApiError, ok, readJson, NotFoundError, BusinessRuleError } from "@/lib/api";
 import { writeAuditLog } from "@/lib/audit";
 import { validateScore, InvalidScoreError } from "@/lib/grading";
+import { loadAccessibleGroup } from "@/lib/group-access";
 
 /**
  * Bulk grade entry (spec §26). Teachers enter a whole group at once;
@@ -41,6 +42,7 @@ export async function PUT(request: NextRequest, { params }: { params: { id: stri
       select: { id: true, maxScore: true, groupId: true, isPublished: true }
     });
     if (!exam) throw new NotFoundError("Exam not found.");
+    await loadAccessibleGroup(ctx, exam.groupId);
 
     const input = await readJson(request, bodySchema);
     const maxScore = Number(exam.maxScore);

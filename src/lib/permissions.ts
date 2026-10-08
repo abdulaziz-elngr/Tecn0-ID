@@ -50,6 +50,7 @@ export const PERMISSIONS = {
     "assignments.view",
     "assignments.manage"
   ],
+  performance: ["performance.view", "performance.recognize"],
   communication: [
     "notifications.view",
     "notifications.send",
@@ -92,6 +93,7 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<string, string[]> = {
     ...PERMISSIONS.attendance,
     ...PERMISSIONS.payments,
     ...PERMISSIONS.exams,
+    ...PERMISSIONS.performance,
     ...PERMISSIONS.communication,
     ...PERMISSIONS.reports,
     ...PERMISSIONS.academic,
@@ -120,6 +122,8 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<string, string[]> = {
     "recitation.manage",
     "assignments.view",
     "assignments.manage",
+    "performance.view",
+    "performance.recognize",
     "reports.view"
   ],
   TEACHER_ASSISTANT: [

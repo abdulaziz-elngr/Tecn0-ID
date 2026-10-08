@@ -132,3 +132,33 @@ that is the symptom, not a real bug in the affected files).
   teacher row is touched. Existing databases: apply
   `prisma/sql/2026-10-stage2-lesson-plans.sql` (additive, idempotent) after the Stage 1
   script. Fresh dev databases can use `prisma db push`.
+
+## Stage 3 — Exams, Recitation, Homework & Student performance
+
+Additive only (script: `prisma/sql/2026-10-stage3-performance.sql`, idempotent — apply it after the
+Stage 1 and 2 scripts; fresh dev databases can use `prisma db push` + `npm run db:seed`).
+
+- **`RecitationSession`** (new): one recitation per lesson of a group — `groupId`, `sessionId`
+  (→ `ClassSession`, unique), `date`, `maxScore`, optional `title`/`notes`.
+- **`Recitation.recitationSessionId`** (new, nullable FK): a student's recitation grade is a normal
+  `Recitation` row pointing at its `RecitationSession`; unique per `(recitationSessionId, studentId)`.
+  Old free-form rows keep it `NULL` and still work (tab "General records").
+- **`Assignment.sessionId`** (new, nullable FK → `ClassSession`): the lesson a homework belongs to.
+  Homework "Completed / Not completed" reuses `AssignmentSubmission.status`
+  (`SUBMITTED`/`LATE`/`GRADED` = completed, `MISSING` = not completed, `PENDING`/no row = not recorded).
+  New homework stores `maxScore = 0` (it is not graded). The older graded flow is kept in the
+  "Graded assignments (legacy)" tab.
+- **`StudentRecognition`** (new, insert-only): student, reason, date, notes, who recorded it.
+- **Exams**: no schema change. `ExamResult` already has `score` / `isAbsent` and a unique
+  `(examId, studentId)`; the new pages only add routes.
+- **Permissions**: `performance.view`, `performance.recognize` (granted by the script to
+  SUPER_ADMIN, CENTER_OWNER, MANAGER, TEACHER).
+
+Scoring methodology for the Student performance page is documented in `src/lib/performance.ts`
+(exams 35 · attendance 25 · homework 20 · recitation 20, missing categories re-weighted, minimum
+samples, ≥ 2 categories to be ranked) and shown to users on the page.
+
+Access rule used by all the new routes (`src/lib/group-access.ts`): organization → branch scope →
+teachers/assistants without `academic.groups.manage` only reach the groups they teach.
+Parent phone numbers never leave the server: the API returns a ready `wa.me` link (or a "no
+parent" / "invalid number" flag); nothing is sent automatically.

@@ -58,7 +58,8 @@ const SECTIONS: NavSection[] = [
     items: [
       { href: "/dashboard/performance/exams", key: "nav.exams" },
       { href: "/dashboard/performance/recitation", key: "nav.recitation" },
-      { href: "/dashboard/performance/assignments", key: "nav.assignments" }
+      { href: "/dashboard/performance/assignments", key: "nav.assignments" },
+      { href: "/dashboard/performance/students", key: "nav.studentPerformance" }
     ]
   },
   {
